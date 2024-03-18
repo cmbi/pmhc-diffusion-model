@@ -1,12 +1,21 @@
+#!/usr/bin/env python
+
 import torch
 import random
 import sys
 
+from Bio.PDB.Atom import Atom
+from Bio.PDB.Residue import Residue
+from Bio.PDB.Chain import Chain
+from Bio.PDB.Model import Model
+from Bio.PDB.Structure import Structure
 
 from torch.utils.data import DataLoader
 
 from diffusionmodel.optimizer import DiffusionModelOptimizer
 from diffusionmodel.data import MhcpDataset
+
+from openfold.np.residue_constants import restype_name_to_atom14_names, restype_1to3, restypes
 
 
 class Model(torch.nn.Module):
@@ -44,7 +53,9 @@ if __name__ == "__main__":
     trans = 32
     T = 10
 
-    dm = DiffusionModelOptimizer(T, Model(T))
+    model = Model(T)
+
+    dm = DiffusionModelOptimizer(T, model)
 
     m = torch.randn(n, dim)
 
@@ -60,6 +71,29 @@ if __name__ == "__main__":
 
             dm.optimize(x)
 
-    z = dm.sample((1, n, dim))
+    torch.save(model.state_dict(), "model.pth")
 
-    print(z)
+    aatype = torch.randint(0, 20, (1, 9))
+
+    z0 = dm.sample(aatype)
+
+    structure = Structure("sample-" + "".join([restypes[i] for i in aatype[0]]))
+
+    model = Model('1')
+    structure.add(model)
+
+    chain_id = "P"
+    chain = Chain(chain_id)
+    model.add(chain)
+
+    for aa_index in aatype:
+        aa_letter = restypes[aa_index]
+        aa_name = restype_1to3[aa_letter]
+
+        residue = Residue(aa_index, aa_name, chain_id)
+        chain.add(residue)
+
+        for atom_index, atom_name in enumerate(restype_name_to_atom14_names[aa_name]):
+            if len(atom_name) > 0:
+                atom = Atom(name, z0[0, aa_index, atom_index, :], element=atom_name[0])
+                residue.add(atom)

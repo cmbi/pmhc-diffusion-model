@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 
 class MhcpDataset(Dataset):
 
-    keys = ["atom14_gt_exists", "atom14_gt_positions"]
+    keys = ["aatype", "atom14_gt_exists", "atom14_gt_positions"]
     treshold = 1.0 - log(500) / log(500000)
 
     def __init__(self, hdf5_path: str):
