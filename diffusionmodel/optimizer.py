@@ -1,8 +1,12 @@
 import random
 from typing import Tuple
 from math import sqrt, exp
+import logging
 
 import torch
+
+
+_log  = logging.getLogger(__name__)
 
 
 def square(x: float) -> float:
@@ -38,7 +42,7 @@ class DiffusionModelOptimizer:
 
         zt = alpha * x + sigma * epsilon
 
-        loss = torch.square(epsilon - self.model(zt, aatype)).sum()
+        loss = torch.square(epsilon - self.model(zt, aatype)).mean(dim=0)
 
         _log.debug(f"optimization loss is {loss}")
 
