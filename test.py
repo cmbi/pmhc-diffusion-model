@@ -4,6 +4,7 @@ import random
 import sys
 import logging
 
+from Bio.PDB.PDBIO import PDBIO
 from Bio.PDB.Atom import Atom
 from Bio.PDB.Residue import Residue
 from Bio.PDB.Chain import Chain
@@ -49,6 +50,34 @@ class Model(torch.nn.Module):
         return e.reshape(shape)
 
 
+def write_structure(x: torch.Tensor, aatype: torch.Tensor, path: str):
+
+    structure = Structure("sample-" + "".join([restypes[i] for i in aatype[0]]))
+
+    structure_model = StructureModel('1')
+    structure.add(model)
+
+    chain_id = "P"
+    chain = Chain(chain_id)
+    structure_model.add(chain)
+
+    for aa_index in aatype:
+        aa_letter = restypes[aa_index]
+        aa_name = restype_1to3[aa_letter]
+
+        residue = Residue(aa_index, aa_name, chain_id)
+        chain.add(residue)
+
+        for atom_index, atom_name in enumerate(restype_name_to_atom14_names[aa_name]):
+            if len(atom_name) > 0:
+                atom = Atom(name, x[0, aa_index, atom_index, :], element=atom_name[0])
+                residue.add(atom)
+
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(path)
+
+
 if __name__ == "__main__":
 
     device = torch.device("cuda")
@@ -88,23 +117,6 @@ if __name__ == "__main__":
 
     z0 = dm.sample(aatype)
 
-    structure = Structure("sample-" + "".join([restypes[i] for i in aatype[0]]))
+    write_structure(z0, aatype, "output.pdb")
 
-    structure_model = StructureModel('1')
-    structure.add(model)
 
-    chain_id = "P"
-    chain = Chain(chain_id)
-    structure_model.add(chain)
-
-    for aa_index in aatype:
-        aa_letter = restypes[aa_index]
-        aa_name = restype_1to3[aa_letter]
-
-        residue = Residue(aa_index, aa_name, chain_id)
-        chain.add(residue)
-
-        for atom_index, atom_name in enumerate(restype_name_to_atom14_names[aa_name]):
-            if len(atom_name) > 0:
-                atom = Atom(name, z0[0, aa_index, atom_index, :], element=atom_name[0])
-                residue.add(atom)
