@@ -96,34 +96,33 @@ if __name__ == "__main__":
     T = 10
     device = torch.device("cuda")
     model = Model(T).to(device=device)
-    model.load_state_dict(torch.load("model.pth"))
 
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    if False:
-        _log.debug(f"initializing dataset")
-        dataset = MhcpDataset(sys.argv[1], device=device)
-        data_size = len(dataset)
-        data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    _log.debug(f"initializing dataset")
+    dataset = MhcpDataset(sys.argv[1], device=device)
+    data_size = len(dataset)
+    data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-        nepoch = 10
-        for epoch_index in range(nepoch):
-            _log.debug(f"starting epoch {epoch_index}")
+    nepoch = 100
+    for epoch_index in range(nepoch):
+        _log.debug(f"starting epoch {epoch_index}")
 
-            n_passed = 0
-            for batch in data_loader:
+        n_passed = 0
+        for batch in data_loader:
 
-                x = batch["peptide_atom14_gt_positions"]
-                aatype = batch["peptide_aatype"]
+            x = batch["peptide_atom14_gt_positions"]
+            aatype = batch["peptide_aatype"]
 
-                dm.optimize(x, aatype)
+            dm.optimize(x, aatype)
 
-                n_passed += batch["peptide_aatype"].shape[0]
-                _log.debug(f"{n_passed}/{data_size} passed ({round(100.0 * n_passed / data_size, 1)} %)")
+            n_passed += batch["peptide_aatype"].shape[0]
+            _log.debug(f"{n_passed}/{data_size} passed ({round(100.0 * n_passed / data_size, 1)} %)")
 
-            torch.save(model.state_dict(), "model.pth")
+        torch.save(model.state_dict(), "model.pth")
 
+    model.load_state_dict(torch.load("model.pth"))
     aatype = torch.randint(0, 20, (1, 9), device=device)
     sample_name = "sample-" + "".join([restypes[i] for i in aatype[0]])
     sample_path = sample_name + ".pdb"
