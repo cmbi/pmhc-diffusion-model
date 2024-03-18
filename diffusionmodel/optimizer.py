@@ -21,7 +21,7 @@ class DiffusionModelOptimizer:
 
         return exp(-2 * (t / self.noise_step_count))
 
-    def optimize(self, x: torch.Tensor):
+    def optimize(self, x: torch.Tensor, aatype: torch.Tensor):
         """
         Args:
             x: [*, n, dim]
@@ -31,37 +31,37 @@ class DiffusionModelOptimizer:
 
         self.optimizer.zero_grad()
 
-        epsilon = torch.randn(x.shape)
+        epsilon = torch.randn(x.shape, device=x.device)
 
         alpha = self.alpha_function(t)
         sigma = sqrt(1.0 - square(alpha))
 
         zt = alpha * x + sigma * epsilon
 
-        loss = torch.square(epsilon - self.model(zt, t)).sum()
+        loss = torch.square(epsilon - self.model(zt, aatype)).sum()
 
         loss.backward()
 
         self.optimizer.step()
 
-    def sample(self, shape: Tuple[int, int, int]) -> torch.Tensor:
+    def sample(self, aatype: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            shape: [*, n, dim]
+            aatype: [*, n]
 
         Returns:
             x: [*, n, dim]
         """
 
-        zt = torch.randn(shape)
+        zt = torch.randn(aatype.shape, device=aatype.device)
         t = self.noise_step_count
 
         while t > 0:
 
             s = t - 1
 
-            epsilon = torch.randn(shape)
-            predicted_epsilon = self.model(zt, s)
+            epsilon = torch.randn(shape, device=aatype.device)
+            predicted_epsilon = self.model(zt, aatype)
 
             alpha_t = self.alpha_function(t)
             sigma_t = sqrt(1.0 - square(alpha_t))
