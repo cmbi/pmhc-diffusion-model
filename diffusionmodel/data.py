@@ -46,13 +46,13 @@ class MhcpDataset(Dataset):
 
             for key in MhcpDataset.keys:
                 t = torch.tensor(peptide[key][()], device=device)
-                data[f"peptide_{key}"] = torch.zeros([MhcpDataset.peptide_size] + t.shape[1:], device=device)
+                data[f"peptide_{key}"] = torch.zeros([MhcpDataset.peptide_size] + list(t.shape[1:]), device=device)
                 data[f"peptide_{key}"][:t.shape[0], ...] = t
                 
 
             for key in MhcpDataset.keys:
                 t = torch.tensor(protein[key][()], device=device)
-                data[f"protein_{key}"] = torch.zeros([MhcpDataset.protein_size] + t.shape[1:], device=device)
+                data[f"protein_{key}"] = torch.zeros([MhcpDataset.protein_size] + list(t.shape[1:]), device=device)
                 data[f"protein_{key}"][:t.shape[0], ...] = t
 
         return data

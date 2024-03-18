@@ -40,6 +40,8 @@ class DiffusionModelOptimizer:
 
         loss = torch.square(epsilon - self.model(zt, aatype)).sum()
 
+        _log.debug(f"optimization loss is {loss}")
+
         loss.backward()
 
         self.optimizer.step()
@@ -53,15 +55,15 @@ class DiffusionModelOptimizer:
             x: [*, n, dim]
         """
 
-        zt = torch.randn(aatype.shape, device=aatype.device)
+        zt = torch.randn(list(aatype.shape) + [14, 3], device=aatype.device)
         t = self.noise_step_count
 
         while t > 0:
 
             s = t - 1
 
-            epsilon = torch.randn(shape, device=aatype.device)
             predicted_epsilon = self.model(zt, aatype)
+            epsilon = torch.randn(predicted_epsilon.shape, device=aatype.device)
 
             alpha_t = self.alpha_function(t)
             sigma_t = sqrt(1.0 - square(alpha_t))

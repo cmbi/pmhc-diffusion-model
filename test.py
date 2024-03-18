@@ -43,34 +43,44 @@ class Model(torch.nn.Module):
     ) -> torch.Tensor:
 
         shape = z.shape
-        z = z.reshape(shape[0], -1)
+        z = z.reshape(shape[0], shape[1], 14 * 3)
 
-        e = self.mlp(torch.cat((z, one_hot(aatype, 20)), dim=-1))
+        e = self.mlp(torch.cat((z, one_hot(aatype.long(), 20)), dim=-1))
 
         return e.reshape(shape)
 
 
 def write_structure(x: torch.Tensor, aatype: torch.Tensor, path: str):
 
-    structure = Structure("sample-" + "".join([restypes[i] for i in aatype[0]]))
+    structure = Structure("".join([restypes[i] for i in aatype]))
 
     structure_model = StructureModel('1')
-    structure.add(model)
+    structure.add(structure_model)
 
     chain_id = "P"
     chain = Chain(chain_id)
     structure_model.add(chain)
 
-    for aa_index in aatype:
+    n = 0
+    for residue_index, aa_index in enumerate(aatype):
         aa_letter = restypes[aa_index]
         aa_name = restype_1to3[aa_letter]
 
-        residue = Residue(aa_index, aa_name, chain_id)
+        residue = Residue((' ', residue_index, ' '), aa_name, chain_id)
         chain.add(residue)
 
         for atom_index, atom_name in enumerate(restype_name_to_atom14_names[aa_name]):
             if len(atom_name) > 0:
-                atom = Atom(name, x[0, aa_index, atom_index, :], element=atom_name[0])
+                n += 1
+                atom = Atom(
+                    atom_name, x[residue_index, atom_index, :],
+                    bfactor=0.0,
+                    occupancy=1.0,
+                    altloc=' ',
+                    fullname=f" {atom_name} ",
+                    element=atom_name[0],
+                    serial_number=n,
+                )
                 residue.add(atom)
 
     io = PDBIO()
@@ -80,43 +90,48 @@ def write_structure(x: torch.Tensor, aatype: torch.Tensor, path: str):
 
 if __name__ == "__main__":
 
-    device = torch.device("cuda")
-
     logging.basicConfig(filename="diffusion.log", filemode='a', level=logging.DEBUG)
 
-    dim = 3
-    n = 10
-    b = 8
-    trans = 32
+    _log.debug(f"initializing model")
     T = 10
-
+    device = torch.device("cuda")
     model = Model(T).to(device=device)
+    model.load_state_dict(torch.load("model.pth"))
 
+    _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    m = torch.randn(n, dim)
+    if False:
+        _log.debug(f"initializing dataset")
+        dataset = MhcpDataset(sys.argv[1], device=device)
+        data_size = len(dataset)
+        data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-    dataset = MhcpDataset(sys.argv[1], device=device)
-    data_loader = DataLoader(dataset, batch_size=8, shuffle=True)
+        nepoch = 10
+        for epoch_index in range(nepoch):
+            _log.debug(f"starting epoch {epoch_index}")
 
-    nepoch = 10
+            n_passed = 0
+            for batch in data_loader:
 
-    for epoch_index in range(nepoch):
-        _log.debug(f"starting epoch {epoch_index}")
+                x = batch["peptide_atom14_gt_positions"]
+                aatype = batch["peptide_aatype"]
 
-        for batch in data_loader:
+                dm.optimize(x, aatype)
 
-            x = batch["peptide_atom14_gt_positions"]
-            aatype = batch["peptide_aatype"]
+                n_passed += batch["peptide_aatype"].shape[0]
+                _log.debug(f"{n_passed}/{data_size} passed ({round(100.0 * n_passed / data_size, 1)} %)")
 
-            dm.optimize(x, aatype)
+            torch.save(model.state_dict(), "model.pth")
 
-        torch.save(model.state_dict(), "model.pth")
+    aatype = torch.randint(0, 20, (1, 9), device=device)
+    sample_name = "sample-" + "".join([restypes[i] for i in aatype[0]])
+    sample_path = sample_name + ".pdb"
 
-    aatype = torch.randint(0, 20, (1, 9))
-
+    _log.debug(f"sampling")
     z0 = dm.sample(aatype)
 
-    write_structure(z0, aatype, "output.pdb")
+    _log.debug(f"writing")
+    write_structure(z0[0], aatype[0], sample_path)
 
 
