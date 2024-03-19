@@ -109,7 +109,7 @@ if __name__ == "__main__":
     device = torch.device("cuda")
     model = Model(T).to(device=device)
     if os.path.isfile("model.pth"):
-        model.load_state_dict(torch.load("model.pth"), map_location=device)
+        model.load_state_dict(torch.load("model.pth", map_location=device))
 
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
