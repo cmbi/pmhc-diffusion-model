@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import os
 import random
 import sys
 import logging
@@ -28,24 +29,35 @@ class Model(torch.nn.Module):
     def __init__(self, T: int):
         super(Model, self).__init__()
 
+        self.T = T
+
         trans = 32
 
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(14 * 3 + 20, trans),
+            torch.nn.Linear(9 * (14 * 3 + 20) + T, trans),
             torch.nn.ReLU(),
-            torch.nn.Linear(trans, 14 * 3),
+            torch.nn.Linear(trans, 9 * 14 * 3),
         )
 
     def forward(
         self, 
         z: torch.Tensor,
-        aatype: torch.Tensor
+        aatype: torch.Tensor,
+        t: int,
     ) -> torch.Tensor:
 
         shape = z.shape
-        z = z.reshape(shape[0], shape[1], 14 * 3)
+        z = z.reshape(shape[0], shape[1] * 14 * 3)
 
-        e = self.mlp(torch.cat((z, one_hot(aatype.long(), 20)), dim=-1))
+        t_onehot = torch.nn.functional.one_hot(torch.tensor(t, device=z.device), self.T).unsqueeze(0).expand(shape[0], self.T)
+
+        aatype_onehot = one_hot(aatype.long(), 20).reshape(shape[0], 20 * 9)
+
+        e = self.mlp(torch.cat((
+            z,
+            aatype_onehot,
+            t_onehot,
+        ), dim=-1))
 
         return e.reshape(shape)
 
@@ -96,6 +108,8 @@ if __name__ == "__main__":
     T = 10
     device = torch.device("cuda")
     model = Model(T).to(device=device)
+    if os.path.isfile("model.pth"):
+        model.load_state_dict(torch.load("model.pth"), map_location=device)
 
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
@@ -105,7 +119,7 @@ if __name__ == "__main__":
     data_size = len(dataset)
     data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-    nepoch = 100
+    nepoch = 1000
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 

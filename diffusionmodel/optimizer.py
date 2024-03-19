@@ -4,6 +4,7 @@ from math import sqrt, exp
 import logging
 
 import torch
+from openfold.np.residue_constants import restype_atom14_mask
 
 
 _log  = logging.getLogger(__name__)
@@ -11,6 +12,10 @@ _log  = logging.getLogger(__name__)
 
 def square(x: float) -> float:
     return x * x
+
+
+def get_mask(aatype: torch.Tensor) -> torch.Tensor:
+    return torch.tensor(restype_atom14_mask, device=aatype.device)[aatype]
 
 
 class DiffusionModelOptimizer:
@@ -31,6 +36,8 @@ class DiffusionModelOptimizer:
             x: [*, n, dim]
         """
 
+        atom_mask = get_mask(aatype)
+
         t = random.randint(0, self.noise_step_count - 1)
 
         self.optimizer.zero_grad()
@@ -42,7 +49,7 @@ class DiffusionModelOptimizer:
 
         zt = alpha * x + sigma * epsilon
 
-        loss = torch.square(epsilon - self.model(zt, aatype)).mean(dim=0)
+        loss = torch.square((epsilon - self.model(zt, aatype, t)) * atom_mask.unsqueeze(-1)).sum() / atom_mask.sum()
 
         _log.debug(f"optimization loss is {loss}")
 
@@ -66,7 +73,7 @@ class DiffusionModelOptimizer:
 
             s = t - 1
 
-            predicted_epsilon = self.model(zt, aatype)
+            predicted_epsilon = self.model(zt, aatype, t)
             epsilon = torch.randn(predicted_epsilon.shape, device=aatype.device)
 
             alpha_t = self.alpha_function(t)
