@@ -36,7 +36,9 @@ class DiffusionModelOptimizer:
             x: [*, n, dim]
         """
 
-        atom_mask = get_mask(aatype)
+        #atom_mask = get_mask(aatype)
+        atom_mask = torch.zeros(x.shape[:-1], device=x.device)
+        atom_mask[:, :, 1] = True
 
         t = random.randint(0, self.noise_step_count - 1)
 
@@ -73,8 +75,7 @@ class DiffusionModelOptimizer:
 
             s = t - 1
 
-            predicted_epsilon = self.model(zt, aatype, t)
-            epsilon = torch.randn(predicted_epsilon.shape, device=aatype.device)
+            epsilon = torch.randn(zt.shape, device=aatype.device)
 
             alpha_t = self.alpha_function(t)
             sigma_t = sqrt(1.0 - square(alpha_t))
@@ -88,7 +89,9 @@ class DiffusionModelOptimizer:
             sigma_ts = sqrt(sqr_sigma_ts)
             sigma_t2s = sigma_ts * sigma_s / sigma_t
 
-            zs = (1.0 / alpha_ts) * zt - sqr_sigma_ts / (alpha_ts * sigma_t) * predicted_epsilon + sigma_t2s * epsilon
+            _log.debug(f"{1.0 / alpha_ts}, {sqr_sigma_ts / (alpha_ts * sigma_t)}, {sigma_t2s}")
+
+            zs = (1.0 / alpha_ts) * zt - sqr_sigma_ts / (alpha_ts * sigma_t) * self.model(zt, aatype, t) + sigma_t2s * epsilon
 
             zt = zs
             t = s

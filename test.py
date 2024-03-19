@@ -34,7 +34,7 @@ class Model(torch.nn.Module):
         trans = 32
 
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(9 * (14 * 3 + 20) + T, trans),
+            torch.nn.Linear(9 * (14 * 3 + 20) + T + 1, trans),
             torch.nn.ReLU(),
             torch.nn.Linear(trans, 9 * 14 * 3),
         )
@@ -49,7 +49,7 @@ class Model(torch.nn.Module):
         shape = z.shape
         z = z.reshape(shape[0], shape[1] * 14 * 3)
 
-        t_onehot = torch.nn.functional.one_hot(torch.tensor(t, device=z.device), self.T).unsqueeze(0).expand(shape[0], self.T)
+        t_onehot = torch.nn.functional.one_hot(torch.tensor(t, device=z.device), self.T + 1).unsqueeze(0).expand(shape[0], self.T + 1)
 
         aatype_onehot = one_hot(aatype.long(), 20).reshape(shape[0], 20 * 9)
 
@@ -82,7 +82,8 @@ def write_structure(x: torch.Tensor, aatype: torch.Tensor, path: str):
         chain.add(residue)
 
         for atom_index, atom_name in enumerate(restype_name_to_atom14_names[aa_name]):
-            if len(atom_name) > 0:
+            #if len(atom_name) > 0:
+            if atom_name.strip() == "CA":
                 n += 1
                 atom = Atom(
                     atom_name, x[residue_index, atom_index, :],
@@ -106,7 +107,7 @@ if __name__ == "__main__":
 
     _log.debug(f"initializing model")
     T = 10
-    device = torch.device("cuda")
+    device = torch.device("cpu")
     model = Model(T).to(device=device)
     if os.path.isfile("model.pth"):
         model.load_state_dict(torch.load("model.pth", map_location=device))
@@ -119,7 +120,7 @@ if __name__ == "__main__":
     data_size = len(dataset)
     data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-    nepoch = 1000
+    nepoch = 100
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
@@ -136,7 +137,7 @@ if __name__ == "__main__":
 
         torch.save(model.state_dict(), "model.pth")
 
-    model.load_state_dict(torch.load("model.pth"))
+    model.load_state_dict(torch.load("model.pth", map_location=device))
     aatype = torch.randint(0, 20, (1, 9), device=device)
     sample_name = "sample-" + "".join([restypes[i] for i in aatype[0]])
     sample_path = sample_name + ".pdb"
