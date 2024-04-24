@@ -49,7 +49,7 @@ class MhcpDataset(Dataset):
 
             x = peptide['atom14_gt_positions'][..., 1, :]
             mask = peptide['atom14_gt_exists'][..., 1]
-            h = peptide['sequence_onehot']
+            h = peptide['sequence_onehot'][:]
 
             data['positions'] = torch.tensor(x, device=device)
             data['mask'] = torch.tensor(mask, device=device)
