@@ -13,11 +13,37 @@ import torch
 from torch.utils.data import DataLoader
 from torch.nn.functional import one_hot
 
+from Bio.PDB.Structure import Structure
+from Bio.PDB.Model import Model as PDBModel
+from Bio.PDB.Chain import Chain
+from Bio.PDB.Residue import Residue
+from Bio.PDB.Atom import Atom
+from Bio.PDB.PDBIO import PDBIO
+
 from diffusion.optimizer import DiffusionModelOptimizer
 
 
 
 _log = logging.getLogger(__name__)
+
+
+def save(x: torch.Tensor, path: str):
+
+    structure = Structure("")
+    model = PDBModel(0)
+    structure.add(model)
+    chain = Chain('A')
+    model.add(chain)
+    for i, p in enumerate(x):
+        res = Residue(("A", i + 1, " "), "ALA", "A")
+        chain.add(res)
+
+        atom = Atom("CA", p, 0.0, 1.0, ' ', " CA ", "C")
+        res.add(atom)
+
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(path)
 
 
 def square(x: float) -> float:
@@ -53,7 +79,7 @@ class EGNNLayer(torch.nn.Module):
         # [*, N, N]
         mask2 = torch.logical_and(mask.unsqueeze(-2), mask.unsqueeze(-1))
         diagonal_index = torch.arange(N).unsqueeze(-1).expand(N, 2)
-        mask2[diagonal_index] = False
+        mask2[:, diagonal_index] = False
 
         # [*, N, N, 3]
         r = (x.unsqueeze(-3) - x.unsqueeze(-2)) * mask2.unsqueeze(-1)
@@ -122,7 +148,7 @@ if __name__ == "__main__":
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    nepoch = 30
+    nepoch = 100
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
@@ -134,12 +160,14 @@ if __name__ == "__main__":
 
     model.load_state_dict(torch.load("model.pth", map_location=device))
 
+    x = next(iter(data_loader))["positions"]
+
     batch = {
-        "positions": torch.randn(1, 9, 3),
+        "positions": x.std() * torch.randn(1, 9, 3),
         "mask": torch.ones(1, 9, dtype=torch.bool),
-        "features": torch.nn.functional.one_hot(torch.randint(0, 21, 9), 22).unsqueeze(0),
+        "features": torch.nn.functional.one_hot(torch.randint(0, 21, (9,)), 22).unsqueeze(0),
     }
 
     x = dm.sample(batch)
-
+    save(x[0], "dm.pdb")
 
