@@ -76,10 +76,20 @@ class EGNNLayer(torch.nn.Module):
     def __init__(self, M: int, H: int):
         super().__init__()
 
-        self.feature_mlp = torch.nn.Linear((M + H), H)
-        self.position_mlp = torch.nn.Linear(M, 3)
+        self.feature_mlp = torch.nn.Sequential(
+            torch.nn.Linear((M + H), 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, H),
+        )
+        self.position_mlp = torch.nn.Sequential(
+            torch.nn.Linear(M, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 3),
+        )
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * H + 1, M),
+            torch.nn.Linear(2 * H + 1, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, M),
             torch.nn.ReLU(),
         )
 
@@ -100,18 +110,17 @@ class EGNNLayer(torch.nn.Module):
 
         # [*, N, N]
         mask2 = torch.logical_and(mask.unsqueeze(-2), mask.unsqueeze(-1))
-        diagonal_index = torch.arange(N).unsqueeze(-1).expand(N, 2)
-        mask2[:, diagonal_index] = False
+        mask2 = torch.logical_and(mask2, torch.logical_not(torch.eye(N, N, dtype=torch.bool).unsqueeze(0)))
 
         # [*, N, N, 3]
-        r = (x.unsqueeze(-3) - x.unsqueeze(-2)) * mask2.unsqueeze(-1)
+        r = (x.unsqueeze(-2) - x.unsqueeze(-3)) * mask2.unsqueeze(-1)
 
         # [*, N, N]
         d2 = (r ** 2).sum(-1)
 
         # [*, N, N, H]
-        hi = h.unsqueeze(-3).expand(-1, N, N, H)
-        hj = h.unsqueeze(-2).expand(-1, N, N, H)
+        hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
+        hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
 
         # [*, N, N, M]
         m = self.message_mlp(torch.cat((hi, hj, d2.unsqueeze(-1)), dim=-1)) * mask2.unsqueeze(-1)
@@ -119,7 +128,7 @@ class EGNNLayer(torch.nn.Module):
         # [*, N, N, 3]
         mx = self.position_mlp(m) * r
 
-        x = x + mx.sum(dim=-2) / (N - 1)
+        x = x + mx.sum(dim=-2) / mask2.float().sum(dim=-1).unsqueeze(-1)
 
         h = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
@@ -159,7 +168,7 @@ if __name__ == "__main__":
 
     hdf5_path = sys.argv[1]
 
-    logging.basicConfig(filename="diffusion.log", filemode='a', level=logging.DEBUG)
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
     device = torch.device("cpu")
 
@@ -186,14 +195,21 @@ if __name__ == "__main__":
 
     model.load_state_dict(torch.load("model.pth", map_location=device))
 
-    x = next(iter(data_loader))["positions"]
+    s = next(iter(data_loader))
+
+    alpha = 0.7
+    sigma = sqrt(1.0 - square(alpha))
 
     batch = {
-        "positions": x.std() * torch.randn(1, 9, 3),
+        "positions": torch.randn(1, 9, 3),
         "mask": torch.ones(1, 9, dtype=torch.bool),
-        "features": torch.nn.functional.one_hot(torch.randint(0, 21, (9,)), 22).unsqueeze(0),
+        "features": s["features"][:1],
     }
 
-    x = dm.sample(batch)
-    save(x[0], "dm.pdb")
+    save(batch["positions"][0], "dm-input.pdb")
+
+    with torch.no_grad():
+        x = dm.sample(batch)
+
+    save(x[0], "dm-output.pdb")
 
