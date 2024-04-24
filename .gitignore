@@ -1,2 +1,9 @@
 # python
 *.pyc
+
+# vi
+*.swp
+*.pyc
+
+# log
+*.log

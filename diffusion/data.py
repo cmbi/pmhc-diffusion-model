@@ -46,17 +46,13 @@ class MhcpDataset(Dataset):
             entry = f5[entry_name]
 
             peptide = entry["peptide"]
-            protein = entry["protein"]
 
-            for key, dtype in MhcpDataset.keys:
-                t = torch.tensor(peptide[key][()], device=device, dtype=dtype)
-                data[f"peptide_{key}"] = torch.zeros([MhcpDataset.peptide_size] + list(t.shape[1:]), device=device, dtype=dtype)
-                data[f"peptide_{key}"][:t.shape[0], ...] = t
-                
+            x = peptide['atom14_gt_positions'][..., 1, :]
+            mask = peptide['atom14_gt_exists'][..., 1]
+            h = peptide['sequence_onehot']
 
-            for key, dtype in MhcpDataset.keys:
-                t = torch.tensor(protein[key][()], device=device, dtype=dtype)
-                data[f"protein_{key}"] = torch.zeros([MhcpDataset.protein_size] + list(t.shape[1:]), device=device, dtype=dtype)
-                data[f"protein_{key}"][:t.shape[0], ...] = t
+            data['positions'] = torch.tensor(x, device=device)
+            data['mask'] = torch.tensor(mask, device=device)
+            data['features'] = torch.tensor(h, device=device)
 
         return data

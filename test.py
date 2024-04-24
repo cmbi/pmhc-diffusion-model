@@ -4,148 +4,142 @@ import os
 import random
 import sys
 import logging
+from math import sqrt
+from typing import Dict
 
-from Bio.PDB.PDBIO import PDBIO
-from Bio.PDB.Atom import Atom
-from Bio.PDB.Residue import Residue
-from Bio.PDB.Chain import Chain
-from Bio.PDB.Model import Model as StructureModel
-from Bio.PDB.Structure import Structure
+from diffusion.data import MhcpDataset
 
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.functional import one_hot
 
-from diffusionmodel.optimizer import DiffusionModelOptimizer
-from diffusionmodel.data import MhcpDataset
+from diffusion.optimizer import DiffusionModelOptimizer
 
-from openfold.np.residue_constants import restype_name_to_atom14_names, restype_1to3, restypes
 
 
 _log = logging.getLogger(__name__)
 
 
-class Model(torch.nn.Module):
-    def __init__(self, T: int):
-        super(Model, self).__init__()
+def square(x: float) -> float:
+    return x * x
 
-        self.T = T
 
-        trans = 32
+class EGNNLayer(torch.nn.Module):
+    def __init__(self, M: int, H: int):
+        super().__init__()
 
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(9 * (14 * 3 + 20) + T + 1, trans),
+        self.feature_mlp = torch.nn.Linear((M + H), H)
+        self.position_mlp = torch.nn.Linear(M, 3)
+        self.message_mlp = torch.nn.Sequential(
+            torch.nn.Linear(2 * H + 1, M),
             torch.nn.ReLU(),
-            torch.nn.Linear(trans, 9 * 14 * 3),
         )
 
+    def forward(self, x: torch.Tensor, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [*, N, 3] (positions)
+            h: [*, N, H] (other features)
+            mask: [*, N]
+
+        Returns:
+            updated x: [*, N, 3]
+            updated h: [*, N, H]
+        """
+
+        N = x.shape[-2]
+        H = h.shape[-1]
+
+        # [*, N, N]
+        mask2 = torch.logical_and(mask.unsqueeze(-2), mask.unsqueeze(-1))
+        diagonal_index = torch.arange(N).unsqueeze(-1).expand(N, 2)
+        mask2[diagonal_index] = False
+
+        # [*, N, N, 3]
+        r = (x.unsqueeze(-3) - x.unsqueeze(-2)) * mask2.unsqueeze(-1)
+
+        # [*, N, N]
+        d2 = (r ** 2).sum(-1)
+
+        # [*, N, N, H]
+        hi = h.unsqueeze(-3).expand(-1, N, N, H)
+        hj = h.unsqueeze(-2).expand(-1, N, N, H)
+
+        # [*, N, N, M]
+        m = self.message_mlp(torch.cat((hi, hj, d2.unsqueeze(-1)), dim=-1)) * mask2.unsqueeze(-1)
+
+        # [*, N, N, 3]
+        mx = self.position_mlp(m) * r
+
+        x = x + mx.sum(dim=-2) / (N - 1)
+
+        h = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
+
+        return x, h
+
+
+class Model(torch.nn.Module):
+    def __init__(self, M: int, H: int):
+        super().__init__()
+
+        self.egnn1 = EGNNLayer(M, H)
+        self.egnn2 = EGNNLayer(M, H)
+        self.act = torch.nn.ReLU()
+
     def forward(
-        self, 
-        z: torch.Tensor,
-        aatype: torch.Tensor,
+        self,
+        batch: Dict[str, torch.Tensor],
         t: int,
     ) -> torch.Tensor:
 
-        shape = z.shape
-        z = z.reshape(shape[0], shape[1] * 14 * 3)
+        x = batch['positions']
+        h = batch['features']
+        mask = batch['mask']
 
-        t_onehot = torch.nn.functional.one_hot(torch.tensor(t, device=z.device), self.T + 1).unsqueeze(0).expand(shape[0], self.T + 1)
+        x, h = self.egnn1(x, h, mask)
+        h = self.act(h)
+        x, h = self.egnn2(x, h, mask)
 
-        aatype_onehot = one_hot(aatype.long(), 20).reshape(shape[0], 20 * 9)
-
-        e = self.mlp(torch.cat((
-            z,
-            aatype_onehot,
-            t_onehot,
-        ), dim=-1))
-
-        return e.reshape(shape)
-
-
-def write_structure(x: torch.Tensor, aatype: torch.Tensor, path: str):
-
-    structure = Structure("".join([restypes[i] for i in aatype]))
-
-    structure_model = StructureModel('1')
-    structure.add(structure_model)
-
-    chain_id = "P"
-    chain = Chain(chain_id)
-    structure_model.add(chain)
-
-    n = 0
-    for residue_index, aa_index in enumerate(aatype):
-        aa_letter = restypes[aa_index]
-        aa_name = restype_1to3[aa_letter]
-
-        residue = Residue((' ', residue_index, ' '), aa_name, chain_id)
-        chain.add(residue)
-
-        for atom_index, atom_name in enumerate(restype_name_to_atom14_names[aa_name]):
-            #if len(atom_name) > 0:
-            if atom_name.strip() == "CA":
-                n += 1
-                atom = Atom(
-                    atom_name, x[residue_index, atom_index, :],
-                    bfactor=0.0,
-                    occupancy=1.0,
-                    altloc=' ',
-                    fullname=f" {atom_name} ",
-                    element=atom_name[0],
-                    serial_number=n,
-                )
-                residue.add(atom)
-
-    io = PDBIO()
-    io.set_structure(structure)
-    io.save(path)
+        return x
 
 
 if __name__ == "__main__":
 
+    hdf5_path = sys.argv[1]
+
     logging.basicConfig(filename="diffusion.log", filemode='a', level=logging.DEBUG)
 
-    _log.debug(f"initializing model")
-    T = 10
     device = torch.device("cpu")
-    model = Model(T).to(device=device)
+
+    data_loader = DataLoader(MhcpDataset(hdf5_path, device), batch_size=64, shuffle=True)
+
+    _log.debug(f"initializing model")
+    T = 100
+    model = Model(16, 22).to(device=device)
     if os.path.isfile("model.pth"):
         model.load_state_dict(torch.load("model.pth", map_location=device))
 
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    _log.debug(f"initializing dataset")
-    dataset = MhcpDataset(sys.argv[1], device=device)
-    data_size = len(dataset)
-    data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
-
-    nepoch = 100
+    nepoch = 30
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
-        n_passed = 0
         for batch in data_loader:
 
-            x = batch["peptide_atom14_gt_positions"]
-            aatype = batch["peptide_aatype"]
-
-            dm.optimize(x, aatype)
-
-            n_passed += batch["peptide_aatype"].shape[0]
-            _log.debug(f"{n_passed}/{data_size} passed ({round(100.0 * n_passed / data_size, 1)} %)")
+            dm.optimize(batch)
 
         torch.save(model.state_dict(), "model.pth")
 
     model.load_state_dict(torch.load("model.pth", map_location=device))
-    aatype = torch.randint(0, 20, (1, 9), device=device)
-    sample_name = "sample-" + "".join([restypes[i] for i in aatype[0]])
-    sample_path = sample_name + ".pdb"
 
-    _log.debug(f"sampling")
-    z0 = dm.sample(aatype)
+    batch = {
+        "positions": torch.randn(1, 9, 3),
+        "mask": torch.ones(1, 9, dtype=torch.bool),
+        "features": torch.nn.functional.one_hot(torch.randint(0, 21, 9), 22).unsqueeze(0),
+    }
 
-    _log.debug(f"writing")
-    write_structure(z0[0], aatype[0], sample_path)
+    x = dm.sample(batch)
 
 
