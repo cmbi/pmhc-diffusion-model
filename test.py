@@ -73,23 +73,25 @@ class PositionalEncoding(torch.nn.Module):
 
 
 class EGNNLayer(torch.nn.Module):
-    def __init__(self, M: int, H: int):
+    def __init__(self, M: int, H: int, O: int):
         super().__init__()
 
+        I = 64
+
         self.feature_mlp = torch.nn.Sequential(
-            torch.nn.Linear((M + H), 64),
+            torch.nn.Linear((M + H), I),
             torch.nn.ReLU(),
-            torch.nn.Linear(64, H),
+            torch.nn.Linear(I, O),
         )
         self.position_mlp = torch.nn.Sequential(
-            torch.nn.Linear(M, 64),
+            torch.nn.Linear(M, I),
             torch.nn.ReLU(),
-            torch.nn.Linear(64, 3),
+            torch.nn.Linear(I, 3),
         )
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * H + 1, 64),
+            torch.nn.Linear(2 * H + 1, I),
             torch.nn.ReLU(),
-            torch.nn.Linear(64, M),
+            torch.nn.Linear(I, M),
             torch.nn.ReLU(),
         )
 
@@ -141,8 +143,10 @@ class Model(torch.nn.Module):
 
         self.posenc = PositionalEncoding(H)
 
-        self.egnn1 = EGNNLayer(M, H)
-        self.egnn2 = EGNNLayer(M, H)
+        I = 64
+
+        self.egnn1 = EGNNLayer(M, H, I)
+        self.egnn2 = EGNNLayer(M, I, 0)
         self.act = torch.nn.ReLU()
 
     def forward(
