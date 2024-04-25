@@ -49,6 +49,8 @@ class DiffusionModelOptimizer:
 
         loss = torch.square(epsilon - self.model(batch, t)).mean()
 
+        loss = loss.clamp(0.0, 2.0)
+
         _log.debug(f"loss is {loss}")
 
         loss.backward()
