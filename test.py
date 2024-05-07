@@ -81,18 +81,23 @@ class EGNNLayer(torch.nn.Module):
         self.feature_mlp = torch.nn.Sequential(
             torch.nn.Linear((M + H), I),
             torch.nn.ReLU(),
+            torch.nn.Linear(I, I),
+            torch.nn.ReLU(),
             torch.nn.Linear(I, O),
         )
         self.position_mlp = torch.nn.Sequential(
             torch.nn.Linear(M, I),
+            torch.nn.ReLU(),
+            torch.nn.Linear(I, I),
             torch.nn.ReLU(),
             torch.nn.Linear(I, 3),
         )
         self.message_mlp = torch.nn.Sequential(
             torch.nn.Linear(2 * H + 1, I),
             torch.nn.ReLU(),
-            torch.nn.Linear(I, M),
+            torch.nn.Linear(I, I),
             torch.nn.ReLU(),
+            torch.nn.Linear(I, M),
         )
 
     def forward(self, x: torch.Tensor, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -114,18 +119,23 @@ class EGNNLayer(torch.nn.Module):
         mask2 = torch.logical_and(mask.unsqueeze(-2), mask.unsqueeze(-1))
         mask2 = torch.logical_and(mask2, torch.logical_not(torch.eye(N, N, dtype=torch.bool).unsqueeze(0)))
 
+        # [N]
+        positions = torch.arange(N)
+        # [1, N, N, 1]
+        neighbours = (torch.abs(positions.unsqueeze(-2) - positions.unsqueeze(-1)) == 1).unsqueeze(0).unsqueeze(-1)
+
         # [*, N, N, 3]
-        r = (x.unsqueeze(-2) - x.unsqueeze(-3)) * mask2.unsqueeze(-1)
+        r = x.unsqueeze(-3) - x.unsqueeze(-2)
 
         # [*, N, N]
         d2 = (r ** 2).sum(-1)
 
         # [*, N, N, H]
-        hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
-        hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
+        hi = h.unsqueeze(-3).expand(-1, N, -1, -1)
+        hj = h.unsqueeze(-2).expand(-1, -1, N, -1)
 
         # [*, N, N, M]
-        m = self.message_mlp(torch.cat((hi, hj, d2.unsqueeze(-1)), dim=-1)) * mask2.unsqueeze(-1)
+        m = self.message_mlp(torch.cat((hi, hj, d2.unsqueeze(-1)), dim=-1)) * mask2.unsqueeze(-1) * neighbours
 
         # [*, N, N, 3]
         mx = self.position_mlp(m) * r
@@ -138,16 +148,26 @@ class EGNNLayer(torch.nn.Module):
 
 
 class Model(torch.nn.Module):
-    def __init__(self, M: int, H: int):
+    def __init__(self, M: int, H: int, T: int):
         super().__init__()
 
-        self.posenc = PositionalEncoding(H)
+        self.posenc = PositionalEncoding(32 - H)
 
         I = 64
 
-        self.egnn1 = EGNNLayer(M, H, I)
-        self.egnn2 = EGNNLayer(M, I, 0)
+        self.egnn1 = EGNNLayer(M, 36, I)
         self.act = torch.nn.ReLU()
+        self.egnn2 = EGNNLayer(M, I, 0)
+
+        #self.mlp = torch.nn.Sequential(
+        #    torch.nn.Linear(36, I),
+        #    torch.nn.ReLU(),
+        #    torch.nn.Linear(I, I),
+        #    torch.nn.ReLU(),
+        #    torch.nn.Linear(I, 3),
+        #)
+
+        self.T = T
 
     def forward(
         self,
@@ -155,17 +175,26 @@ class Model(torch.nn.Module):
         t: int,
     ) -> torch.Tensor:
 
-        x = batch['positions']
+        z = batch['positions']
         h = batch['features']
         mask = batch['mask']
 
-        h = self.posenc(h)
+        ft = torch.tensor([[[t / self.T]]]).expand(list(h.shape[:-1]) + [1])
 
-        x, h = self.egnn1(x, h, mask)
+        #p = torch.eye(9, 32 - h.shape[-1]).unsqueeze(0).expand(h.shape[0], -1, -1)
+        p = self.posenc(torch.zeros(list(h.shape[:-1]) + [32 - h.shape[-1]]))
+        h = torch.cat((h, p, z, ft), dim=-1)
+
+        #e = self.mlp(h)
+
+        z, h = self.egnn1(z, h, mask)
+
+        z = self.act(z)
         h = self.act(h)
-        x, h = self.egnn2(x, h, mask)
 
-        return x
+        z, h = self.egnn2(z, h, mask)
+
+        return z
 
 
 if __name__ == "__main__":
@@ -176,18 +205,21 @@ if __name__ == "__main__":
 
     device = torch.device("cpu")
 
-    data_loader = DataLoader(MhcpDataset(hdf5_path, device), batch_size=64, shuffle=True)
+    torch.autograd.detect_anomaly(check_nan=True)
+
+    dataset = MhcpDataset(hdf5_path, device)
+    data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     _log.debug(f"initializing model")
-    T = 100
-    model = Model(16, 22).to(device=device)
+    T = 1000
+    model = Model(16, 22, T).to(device=device)
     if os.path.isfile("model.pth"):
         model.load_state_dict(torch.load("model.pth", map_location=device))
 
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    nepoch = 100
+    nepoch = 30
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
@@ -209,6 +241,8 @@ if __name__ == "__main__":
         "mask": torch.ones(1, 9, dtype=torch.bool),
         "features": s["features"][:1],
     }
+
+    save(s["positions"][0], "dm-true.pdb")
 
     save(batch["positions"][0], "dm-input.pdb")
 
