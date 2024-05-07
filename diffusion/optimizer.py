@@ -22,10 +22,6 @@ class DiffusionModelOptimizer:
         self.model = model
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-    def alpha_function(self, t: int) -> float:
-
-        return exp(-2 * (t / self.noise_step_count))
-
     def optimize(self, batch: Dict[str, torch.Tensor]):
 
         x = batch["positions"]
@@ -36,7 +32,8 @@ class DiffusionModelOptimizer:
 
         epsilon = torch.randn(x.shape, device=x.device)
 
-        alpha = self.alpha_function(t)
+        beta = 0.0001 + 0.8 * t / self.noise_step_count
+        alpha = 1.0 - beta
         sigma = sqrt(1.0 - square(alpha))
 
         zt = alpha * x + sigma * epsilon
@@ -47,9 +44,10 @@ class DiffusionModelOptimizer:
             "features": batch["features"],
         }
 
-        loss = torch.square(epsilon - self.model(batch, t)).mean()
+        loss = (torch.square(epsilon - self.model(batch, t)).sum(dim=(-2, -1)) / x.shape[-2]).mean()
 
-        loss = loss.clamp(0.0, 2.0)
+        if loss.isnan().any():
+            raise RuntimeError("NaN loss")
 
         _log.debug(f"loss is {loss}")
 
@@ -68,11 +66,19 @@ class DiffusionModelOptimizer:
 
             epsilon = torch.randn(zt.shape, device=zt.device)
 
-            alpha_t = self.alpha_function(t)
+            beta_t = 0.0001 + 0.9 * t / self.noise_step_count
+            alpha_t = 1.0 - beta_t
             sigma_t = sqrt(1.0 - square(alpha_t))
 
-            alpha_s = self.alpha_function(s)
+            if sigma_t == 0.0:
+                raise RuntimeError("zero sigma")
+
+            beta_s = 0.0001 + 0.9 * s / self.noise_step_count
+            alpha_s = 1.0 - beta_s
             sigma_s = sqrt(1.0 - square(alpha_s))
+
+            if alpha_s == 0.0:
+                raise RuntimeError("zero alpha")
 
             alpha_ts = alpha_t / alpha_s
             sqr_sigma_ts = square(sigma_t) - square(sigma_s) * alpha_ts
@@ -89,6 +95,9 @@ class DiffusionModelOptimizer:
             }
 
             zs = (1.0 / alpha_ts) * zt - sqr_sigma_ts / (alpha_ts * sigma_t) * self.model(batch, t) + sigma_t2s * epsilon
+
+            if zs.isnan().any():
+                raise RuntimeError("NaN coords")
 
             zt = zs
             t = s
