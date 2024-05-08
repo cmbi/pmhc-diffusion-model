@@ -1,6 +1,6 @@
 import random
 from typing import Tuple, Dict, Optional
-from math import sqrt, exp
+from math import sqrt, exp, pi
 import logging
 
 import torch
@@ -29,7 +29,7 @@ class DiffusionModelOptimizer:
         # position vectors
         positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
 
-        # rotation quaternions
+        # normalize rotation quaternions
         rotations_true = frames_true.get_rots().get_quats()
         rotations_pred = frames_pred.get_rots().get_quats()
 
@@ -39,9 +39,10 @@ class DiffusionModelOptimizer:
         rotations_true = rotations_true / rotations_true_norm.unsqueeze(-1)
         rotations_pred = rotations_pred / rotations_pred_norm.unsqueeze(-1)
 
-        rotations_delta = quat_multiply(rotations_pred, invert_quat(rotations_true))
+        dots = (rotations_pred * rotations_true).sum(dim=-1)
+        angles = torch.acos(dots)
 
-        rotations_loss = torch.square(rotations_delta).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+        rotations_loss = torch.square(angles).sum(dim=-1) / mask.sum(dim=-1)
 
         return positions_loss + rotations_loss
 
@@ -68,7 +69,7 @@ class DiffusionModelOptimizer:
         rotations = rotations_signal * (torch.sin(alpha * angles) / torch.sin(angles)).unsqueeze(-1) + \
                     rotations_noise * (torch.sin(sigma * angles) / torch.sin(angles)).unsqueeze(-1)
 
-        return Rigid(Rotation(quats=rotations), positions)
+        return Rigid(Rotation(quats=rotations, normalize_quats=True), positions)
 
     def optimize(self, batch: Dict[str, torch.Tensor], beta_max: Optional[float] = 1.0):
 
