@@ -1,9 +1,10 @@
 import random
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 from math import sqrt, exp
 import logging
 
 import torch
+from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply
 
 
 _log  = logging.getLogger(__name__)
@@ -22,29 +23,78 @@ class DiffusionModelOptimizer:
         self.model = model
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-    def optimize(self, batch: Dict[str, torch.Tensor]):
+    @staticmethod
+    def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        x = batch["positions"]
+        # position vectors
+        positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+
+        # rotation quaternions
+        rotations_true = frames_true.get_rots().get_quats()
+        rotations_pred = frames_pred.get_rots().get_quats()
+
+        rotations_true_norm = torch.sqrt(torch.square(rotations_true).sum(dim=-1))
+        rotations_pred_norm = torch.sqrt(torch.square(rotations_pred).sum(dim=-1))
+
+        rotations_true = rotations_true / rotations_true_norm.unsqueeze(-1)
+        rotations_pred = rotations_pred / rotations_pred_norm.unsqueeze(-1)
+
+        rotations_delta = quat_multiply(rotations_pred, invert_quat(rotations_true))
+
+        rotations_loss = torch.square(rotations_delta).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+
+        return positions_loss + rotations_loss
+
+    @staticmethod
+    def interpolate(frames: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
+
+        # position vectors
+        positions = frames.get_trans() * alpha + sigma * noise.get_trans()
+
+        # rotation quaternions
+        rotations_signal = frames.get_rots().get_quats()
+        rotations_noise = noise.get_rots().get_quats()
+
+        rotations_signal_norm = torch.sqrt(torch.square(rotations_signal).sum(dim=-1))
+        rotations_noise_norm = torch.sqrt(torch.square(rotations_noise).sum(dim=-1))
+
+        rotations_signal = rotations_signal / rotations_signal_norm.unsqueeze(dim=-1)
+        rotations_noise = rotations_noise / rotations_noise_norm.unsqueeze(dim=-1)
+
+        # slerp
+        dots = (rotations_signal * rotations_noise).sum(dim=-1)
+        dots = torch.where(dots < 0.0, -dots, dots)
+        angles = torch.acos(dots)
+        rotations = rotations_signal * (torch.sin(alpha * angles) / torch.sin(angles)).unsqueeze(-1) + \
+                    rotations_noise * (torch.sin(sigma * angles) / torch.sin(angles)).unsqueeze(-1)
+
+        return Rigid(Rotation(quats=rotations), positions)
+
+    def optimize(self, batch: Dict[str, torch.Tensor], beta_max: Optional[float] = 1.0):
+
+        frames = batch["frames"]
 
         t = random.randint(0, self.noise_step_count - 1)
 
         self.optimizer.zero_grad()
 
-        epsilon = torch.randn(x.shape, device=x.device)
+        epsilon = Rigid.from_tensor_7(torch.randn(frames.shape, device=frames.device))
 
-        beta = 0.0001 + 0.8 * t / self.noise_step_count
+        beta_min = 0.0001
+        beta_delta = beta_max - beta_min
+        beta = beta_min + beta_delta * t / self.noise_step_count
         alpha = 1.0 - beta
         sigma = sqrt(1.0 - square(alpha))
 
-        zt = alpha * x + sigma * epsilon
+        zt = self.interpolate(Rigid.from_tensor_7(frames), epsilon, alpha, sigma)
 
         batch = {
-            "positions": zt,
+            "frames": zt,
             "mask": batch["mask"],
             "features": batch["features"],
         }
 
-        loss = (torch.square(epsilon - self.model(batch, t)).sum(dim=(-2, -1)) / x.shape[-2]).mean()
+        loss = self.get_loss(epsilon, self.model(batch, t), batch["mask"]).mean()
 
         if loss.isnan().any():
             raise RuntimeError("NaN loss")
@@ -55,16 +105,18 @@ class DiffusionModelOptimizer:
 
         self.optimizer.step()
 
-    def sample(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def sample(self, batch: Dict[str, torch.Tensor]) -> Rigid:
 
-        zt = batch["positions"]
+        data_shape = batch["frames"].shape
+
+        zt = Rigid.from_tensor_7(batch["frames"])
 
         t = self.noise_step_count
         while t > 0:
 
             s = t - 1
 
-            epsilon = torch.randn(zt.shape, device=zt.device)
+            epsilon = Rigid.from_tensor_7(torch.randn(data_shape, device=zt.device))
 
             beta_t = 0.0001 + 0.9 * t / self.noise_step_count
             alpha_t = 1.0 - beta_t
@@ -86,18 +138,18 @@ class DiffusionModelOptimizer:
             sigma_ts = sqrt(sqr_sigma_ts)
             sigma_t2s = sigma_ts * sigma_s / sigma_t
 
-            _log.debug(f"at {t}: {1.0 / alpha_ts}, {sqr_sigma_ts / (alpha_ts * sigma_t)}, {sigma_t2s}")
-
             batch = {
-                "positions": zt,
+                "frames": zt,
                 "mask": batch["mask"],
                 "features": batch["features"],
             }
 
-            zs = (1.0 / alpha_ts) * zt - sqr_sigma_ts / (alpha_ts * sigma_t) * self.model(batch, t) + sigma_t2s * epsilon
-
-            if zs.isnan().any():
-                raise RuntimeError("NaN coords")
+            zs = self.interpolate(
+                self.interpolate(zt, self.model(batch, t), (1.0 / alpha_ts), -sqr_sigma_ts / (alpha_ts * sigma_t)),
+                epsilon,
+                1.0,
+                sigma_t2s
+            )
 
             zt = zs
             t = s

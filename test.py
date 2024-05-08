@@ -20,6 +20,9 @@ from Bio.PDB.Residue import Residue
 from Bio.PDB.Atom import Atom
 from Bio.PDB.PDBIO import PDBIO
 
+from openfold.utils.rigid_utils import Rigid
+from openfold.np.residue_constants import rigid_group_atom_positions
+
 from diffusion.optimizer import DiffusionModelOptimizer
 
 
@@ -27,19 +30,27 @@ from diffusion.optimizer import DiffusionModelOptimizer
 _log = logging.getLogger(__name__)
 
 
-def save(x: torch.Tensor, path: str):
+def save(frames: Rigid, path: str):
 
     structure = Structure("")
     model = PDBModel(0)
     structure.add(model)
     chain = Chain('A')
     model.add(chain)
-    for i, p in enumerate(x):
+    for i in range(frames.shape[0]):
+        frame = frames[i]
+
         res = Residue(("A", i + 1, " "), "ALA", "A")
         chain.add(res)
 
-        atom = Atom("CA", p, 0.0, 1.0, ' ', " CA ", "C")
-        res.add(atom)
+        for atom_name, group_id, p in rigid_group_atom_positions["ALA"]:
+
+            if group_id == 0:
+
+                p = frame.apply(torch.tensor(p))
+
+                atom = Atom(atom_name, p, 0.0, 1.0, ' ', f" {atom_name} ", atom_name[0])
+                res.add(atom)
 
     io = PDBIO()
     io.set_structure(structure)
@@ -100,7 +111,7 @@ class EGNNLayer(torch.nn.Module):
             torch.nn.Linear(I, M),
         )
 
-    def forward(self, x: torch.Tensor, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, frames: torch.Tensor, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: [*, N, 3] (positions)
@@ -112,7 +123,7 @@ class EGNNLayer(torch.nn.Module):
             updated h: [*, N, H]
         """
 
-        N = x.shape[-2]
+        N = frames.shape[-2]
         H = h.shape[-1]
 
         # [*, N, N]
@@ -155,17 +166,13 @@ class Model(torch.nn.Module):
 
         I = 64
 
-        self.egnn1 = EGNNLayer(M, 36, I)
-        self.act = torch.nn.ReLU()
-        self.egnn2 = EGNNLayer(M, I, 0)
-
-        #self.mlp = torch.nn.Sequential(
-        #    torch.nn.Linear(36, I),
-        #    torch.nn.ReLU(),
-        #    torch.nn.Linear(I, I),
-        #    torch.nn.ReLU(),
-        #    torch.nn.Linear(I, 3),
-        #)
+        self.frames_mlp = torch.nn.Sequential(
+            torch.nn.Linear(40, I),
+            torch.nn.ReLU(),
+            torch.nn.Linear(I, I),
+            torch.nn.ReLU(),
+            torch.nn.Linear(I, 6),
+        )
 
         self.T = T
 
@@ -173,38 +180,33 @@ class Model(torch.nn.Module):
         self,
         batch: Dict[str, torch.Tensor],
         t: int,
-    ) -> torch.Tensor:
+    ) -> Rigid:
 
-        z = batch['positions']
+        frames = batch['frames'].to_tensor_7()
         h = batch['features']
         mask = batch['mask']
 
         ft = torch.tensor([[[t / self.T]]]).expand(list(h.shape[:-1]) + [1])
 
-        #p = torch.eye(9, 32 - h.shape[-1]).unsqueeze(0).expand(h.shape[0], -1, -1)
         p = self.posenc(torch.zeros(list(h.shape[:-1]) + [32 - h.shape[-1]]))
-        h = torch.cat((h, p, z, ft), dim=-1)
+        h = torch.cat((h, p, frames, ft), dim=-1)
 
-        #e = self.mlp(h)
+        upd = self.frames_mlp(h)
 
-        z, h = self.egnn1(z, h, mask)
-
-        z = self.act(z)
-        h = self.act(h)
-
-        z, h = self.egnn2(z, h, mask)
-
-        return z
+        return Rigid.identity(frames.shape[:-1]).compose_q_update_vec(upd)
 
 
 if __name__ == "__main__":
 
     hdf5_path = sys.argv[1]
 
+    model_path = "model.pth"
+
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
     device = torch.device("cpu")
 
+    # init
     torch.autograd.detect_anomaly(check_nan=True)
 
     dataset = MhcpDataset(hdf5_path, device)
@@ -219,17 +221,18 @@ if __name__ == "__main__":
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    nepoch = 30
+    # train
+    nepoch = 10
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
         for batch in data_loader:
+            dm.optimize(batch, beta_max=0.8)
 
-            dm.optimize(batch)
+        torch.save(model.state_dict(), model_path)
 
-        torch.save(model.state_dict(), "model.pth")
-
-    model.load_state_dict(torch.load("model.pth", map_location=device))
+    # sample
+    model.load_state_dict(torch.load(model_path, map_location=device))
 
     s = next(iter(data_loader))
 
@@ -237,14 +240,14 @@ if __name__ == "__main__":
     sigma = sqrt(1.0 - square(alpha))
 
     batch = {
-        "positions": torch.randn(1, 9, 3),
+        "frames": torch.randn(1, 9, 7),
         "mask": torch.ones(1, 9, dtype=torch.bool),
         "features": s["features"][:1],
     }
 
-    save(s["positions"][0], "dm-true.pdb")
+    save(Rigid.from_tensor_7(s["frames"][0]), "dm-true.pdb")
 
-    save(batch["positions"][0], "dm-input.pdb")
+    save(Rigid.from_tensor_7(batch["frames"][0]), "dm-input.pdb")
 
     with torch.no_grad():
         x = dm.sample(batch)

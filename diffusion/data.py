@@ -8,18 +8,13 @@ import h5py
 import torch
 from torch.utils.data import Dataset
 
+from openfold.utils.rigid_utils import Rigid
+
 
 class MhcpDataset(Dataset):
 
     protein_size = 200
     peptide_size = 9
-
-    keys = [
-        ("aatype", torch.long),
-        ("atom14_gt_exists", torch.float),
-        ("atom14_gt_positions", torch.float)
-    ]
-    treshold = 1.0 - log(500) / log(500000)
 
     def __init__(self, hdf5_path: str, device: Optional[torch.device] = None):
 
@@ -47,12 +42,12 @@ class MhcpDataset(Dataset):
 
             peptide = entry["peptide"]
 
-            x = peptide['atom14_gt_positions'][..., 1, :]
-            mask = peptide['atom14_gt_exists'][..., 1]
+            frames = peptide['backbone_rigid_tensor'][:]
+            mask = peptide['backbone_rigid_mask'][:]
             h = peptide['sequence_onehot'][:]
 
-            data['positions'] = torch.tensor(x, device=device)
             data['mask'] = torch.tensor(mask, device=device)
+            data['frames'] = Rigid.from_tensor_4x4(torch.tensor(frames, device=device)).to_tensor_7()
             data['features'] = torch.tensor(h, device=device)
 
         return data
