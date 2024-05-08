@@ -20,7 +20,7 @@ from Bio.PDB.Residue import Residue
 from Bio.PDB.Atom import Atom
 from Bio.PDB.PDBIO import PDBIO
 
-from openfold.utils.rigid_utils import Rigid
+from openfold.utils.rigid_utils import Rigid, Rotation
 from openfold.np.residue_constants import rigid_group_atom_positions
 
 from diffusion.optimizer import DiffusionModelOptimizer
@@ -39,6 +39,11 @@ def save(frames: Rigid, path: str):
     model.add(chain)
     for i in range(frames.shape[0]):
         frame = frames[i]
+
+        # normalize quaternions
+        trans = frame.get_trans()
+        quats = frame.get_rots().get_quats()
+        frame = Rigid(Rotation(quats=quats, normalize_quats=True), trans)
 
         res = Residue(("A", i + 1, " "), "ALA", "A")
         chain.add(res)
