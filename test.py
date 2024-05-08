@@ -5,7 +5,7 @@ import random
 import sys
 import logging
 from math import sqrt, log
-from typing import Dict
+from typing import Dict, Union
 
 from diffusion.data import MhcpDataset
 
@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.nn.functional import one_hot
 
-from openfold.utils.rigid_utils import Rigid
+from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply_by_vec
 
 from diffusion.tools.pdb import save
 from diffusion.optimizer import DiffusionModelOptimizer
@@ -136,29 +136,36 @@ class Model(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(I, I),
             torch.nn.ReLU(),
-            torch.nn.Linear(I, 6),
+            torch.nn.Linear(I, 7),
         )
 
         self.T = T
 
     def forward(
         self,
-        batch: Dict[str, torch.Tensor],
+        batch: Dict[str, Union[torch.Tensor, Rigid]],
         t: int,
     ) -> Rigid:
 
-        frames = batch['frames'].to_tensor_7()
+        frames = batch['frames']
+
+        positions = frames.get_trans()
+
+        quats = frames.get_rots().get_quats()
+
         h = batch['features']
         mask = batch['mask']
 
         ft = torch.tensor([[[t / self.T]]]).expand(list(h.shape[:-1]) + [1])
 
         p = self.posenc(torch.zeros(list(h.shape[:-1]) + [32 - h.shape[-1]]))
-        h = torch.cat((h, p, frames, ft), dim=-1)
 
-        upd = self.frames_mlp(h)
+        upd = self.frames_mlp(torch.cat((positions, quats, h, p, ft), dim=-1))
 
-        return Rigid.identity(frames.shape[:-1]).compose_q_update_vec(upd)
+        noise_positions = upd[..., 4:]
+        noise_quats = upd[..., :4]
+
+        return Rigid(Rotation(quats=noise_quats, normalize_quats=True), noise_positions)
 
 
 if __name__ == "__main__":
@@ -200,9 +207,6 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(model_path, map_location=device))
 
     s = next(iter(data_loader))
-
-    alpha = 0.7
-    sigma = sqrt(1.0 - square(alpha))
 
     batch = {
         "frames": torch.randn(1, 9, 7),
