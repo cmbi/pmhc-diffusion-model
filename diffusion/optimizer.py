@@ -47,13 +47,13 @@ class DiffusionModelOptimizer:
         return positions_loss + rotations_loss
 
     @staticmethod
-    def interpolate(frames: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
+    def interpolate(signal: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
 
         # position vectors
-        positions = frames.get_trans() * alpha + sigma * noise.get_trans()
+        positions = signal.get_trans() * alpha + sigma * noise.get_trans()
 
         # rotation quaternions
-        rotations_signal = frames.get_rots().get_quats()
+        rotations_signal = signal.get_rots().get_quats()
         rotations_noise = noise.get_rots().get_quats()
 
         rotations_signal_norm = torch.sqrt(torch.square(rotations_signal).sum(dim=-1))
@@ -79,7 +79,7 @@ class DiffusionModelOptimizer:
 
         self.optimizer.zero_grad()
 
-        epsilon = Rigid.from_tensor_7(torch.randn(frames.shape, device=frames.device))
+        epsilon = Rigid.from_tensor_7(torch.randn(frames.shape, device=frames.device) * 10.0)
 
         beta_min = 0.0001
         beta_delta = beta_max - beta_min

@@ -147,25 +147,28 @@ class Model(torch.nn.Module):
         t: int,
     ) -> Rigid:
 
-        frames = batch['frames']
+        noised_frames = batch['frames']
 
-        positions = frames.get_trans()
+        noised_positions = noised_frames.get_trans()
 
-        quats = frames.get_rots().get_quats()
+        noised_quats = noised_frames.get_rots().get_quats()
 
         h = batch['features']
         mask = batch['mask']
 
         ft = torch.tensor([[[t / self.T]]]).expand(list(h.shape[:-1]) + [1])
 
+        # make residue position features
         p = self.posenc(torch.zeros(list(h.shape[:-1]) + [32 - h.shape[-1]]))
 
-        upd = self.frames_mlp(torch.cat((positions, quats, h, p, ft), dim=-1))
+        # input all frames + features to MLP
+        upd = self.frames_mlp(torch.cat((noised_positions, noised_quats, h, p, ft), dim=-1))
 
-        noise_positions = upd[..., 4:]
-        noise_quats = upd[..., :4]
+        # predicted noise frames
+        upd_positions = upd[..., 4:]
+        upd_quats = upd[..., :4]
 
-        return Rigid(Rotation(quats=noise_quats, normalize_quats=True), noise_positions)
+        return Rigid(Rotation(quats=upd_quats, normalize_quats=True), upd_positions)
 
 
 if __name__ == "__main__":
@@ -209,7 +212,7 @@ if __name__ == "__main__":
     s = next(iter(data_loader))
 
     batch = {
-        "frames": torch.randn(1, 9, 7),
+        "frames": torch.randn(1, 9, 7) * 10.0,
         "mask": torch.ones(1, 9, dtype=torch.bool),
         "features": s["features"][:1],
     }
