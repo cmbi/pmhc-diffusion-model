@@ -100,7 +100,7 @@ class DiffusionModelOptimizer:
         if loss.isnan().any():
             raise RuntimeError("NaN loss")
 
-        _log.debug(f"loss is {loss}")
+        _log.debug(f"beta is {beta:.3f}, loss is {loss:.3f}")
 
         loss.backward()
 
