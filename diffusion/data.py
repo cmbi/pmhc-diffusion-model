@@ -42,8 +42,13 @@ class MhcpDataset(Dataset):
 
             peptide = entry["peptide"]
 
+            # backbone rotation(quaternion) + c-alpha xyz
             frames = peptide['backbone_rigid_tensor'][:]
+
+            # backbone reswise mask
             mask = peptide['backbone_rigid_mask'][:]
+
+            # one-hot encoded amino acid sequence
             h = peptide['sequence_onehot'][:]
 
             data['mask'] = torch.tensor(mask, device=device)
