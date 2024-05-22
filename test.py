@@ -194,7 +194,7 @@ if __name__ == "__main__":
     dm = DiffusionModelOptimizer(T, model)
 
     # train
-    nepoch = 10
+    nepoch = 100
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
@@ -214,12 +214,17 @@ if __name__ == "__main__":
         "features": s["features"][:1],
     }
 
-    save(Rigid.from_tensor_7(s["frames"][0]), "dm-true.pdb")
+    true_frames = Rigid.from_tensor_7(s["frames"][0])
+    input_frames = Rigid.from_tensor_7(batch["frames"][0])
 
-    save(Rigid.from_tensor_7(batch["frames"][0]), "dm-input.pdb")
+    save(true_frames, "dm-true.pdb")
+    save(input_frames, "dm-input.pdb")
 
     with torch.no_grad():
-        x = dm.sample(batch)
+        pred_frames = dm.sample(batch)
 
-    save(x[0], "dm-output.pdb")
+    save(pred_frames[0], "dm-output.pdb")
 
+    rmsd = torch.sqrt(((true_frames.get_trans() - pred_frames.get_trans()[0]) ** 2).sum() / 9)
+
+    _log.info(f"reconstructed with RMSD {rmsd} A")
