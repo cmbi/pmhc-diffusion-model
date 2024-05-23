@@ -34,6 +34,6 @@ if __name__ == "__main__":
 
     noise = torch.randn(frames.shape)
 
-    frames = DiffusionModelOptimizer.interpolate(Rigid.from_tensor_7(frames), Rigid.from_tensor_7(noise), alpha, sigma)
+    frames = DiffusionModelOptimizer.combine(Rigid.from_tensor_7(frames), Rigid.from_tensor_7(noise), alpha, sigma)
 
     save(frames, args.output_path)

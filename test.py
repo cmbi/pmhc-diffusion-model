@@ -217,17 +217,13 @@ if __name__ == "__main__":
         "features": s["features"][:1],
     }
 
-    true_frames = Rigid.from_tensor_7(s["frames"][0])
-    input_frames = Rigid.from_tensor_7(batch["frames"][0])
+    true_frames = Rigid.from_tensor_7(s["frames"])
+    input_frames = Rigid.from_tensor_7(batch["frames"])
 
-    save(true_frames, "dm-true.pdb")
-    save(input_frames, "dm-input.pdb")
+    save(true_frames[0], "dm-true.pdb")
+    save(input_frames[0], "dm-input.pdb")
 
     with torch.no_grad():
-        pred_frames = dm.sample(batch)
+        pred_frames = dm.sample(batch, true_frames)
 
     save(pred_frames[0], "dm-output.pdb")
-
-    rmsd = torch.sqrt(((true_frames.get_trans() - pred_frames.get_trans()[0]) ** 2).sum() / 9)
-
-    _log.info(f"reconstructed with RMSD {rmsd} A")
