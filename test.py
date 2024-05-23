@@ -6,6 +6,7 @@ import sys
 import logging
 from math import sqrt, log
 from typing import Dict, Union
+from argparse import ArgumentParser
 
 from diffusion.data import MhcpDataset
 
@@ -20,6 +21,11 @@ from diffusion.optimizer import DiffusionModelOptimizer
 
 
 _log = logging.getLogger(__name__)
+
+
+arg_parser = ArgumentParser()
+arg_parser.add_argument("train_hdf5")
+arg_parser.add_argument("test_hdf5")
 
 
 def square(x: float) -> float:
@@ -173,7 +179,7 @@ class Model(torch.nn.Module):
 
 if __name__ == "__main__":
 
-    hdf5_path = sys.argv[1]
+    args = arg_parser.parse_args()
 
     model_path = "model.pth"
 
@@ -184,8 +190,8 @@ if __name__ == "__main__":
     # init
     torch.autograd.detect_anomaly(check_nan=True)
 
-    dataset = MhcpDataset(hdf5_path, device)
-    data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    train_dataset = MhcpDataset(args.train_hdf5, device)
+    train_data_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
     _log.debug(f"initializing model")
     T = 1000
@@ -197,11 +203,11 @@ if __name__ == "__main__":
     dm = DiffusionModelOptimizer(T, model)
 
     # train
-    nepoch = 100
+    nepoch = 30
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
-        for batch in data_loader:
+        for batch in train_data_loader:
             dm.optimize(batch, beta_max=0.8)
 
         torch.save(model.state_dict(), model_path)
@@ -209,16 +215,28 @@ if __name__ == "__main__":
     # sample
     model.load_state_dict(torch.load(model_path, map_location=device))
 
-    s = next(iter(data_loader))
+    test_dataset = MhcpDataset(args.test_hdf5, device)
+    test_entry = test_dataset[0]
+
+    # for sampling, make a batch of size 1
+    test_entry = {key: test_entry[key].unsqueeze(0) for key in test_entry}
+
+    true_frames = Rigid.from_tensor_7(test_entry["frames"])
+    frame_dimensions = list(range(len(true_frames.shape)))
+
+    std_pos = true_frames.get_trans().std()
+    mean_pos = true_frames.get_trans().mean(dim=frame_dimensions)
+
+    input_frames = Rigid(
+        Rotation(quats=torch.randn([1, true_frames.shape[1], 4]), normalize_quats=True),
+        torch.randn([1, true_frames.shape[1], 3]) * std_pos + mean_pos,
+    )
 
     batch = {
-        "frames": torch.randn(1, 9, 7) * 10.0,
-        "mask": torch.ones(1, 9, dtype=torch.bool),
-        "features": s["features"][:1],
+        "frames": input_frames.to_tensor_7(),
+        "mask": test_entry["mask"],
+        "features": test_entry["features"],
     }
-
-    true_frames = Rigid.from_tensor_7(s["frames"])
-    input_frames = Rigid.from_tensor_7(batch["frames"])
 
     save(true_frames[0], "dm-true.pdb")
     save(input_frames[0], "dm-input.pdb")

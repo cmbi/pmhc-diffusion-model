@@ -52,7 +52,7 @@ class MhcpDataset(Dataset):
             h = peptide['sequence_onehot'][:]
 
             data['mask'] = torch.tensor(mask, device=device)
-            data['frames'] = Rigid.from_tensor_4x4(torch.tensor(frames, device=device)).to_tensor_7()
+            data['frames'] = Rigid.from_tensor_4x4(torch.tensor(frames, device=device)).to_tensor_7()  # convert to tensor, for collation
             data['features'] = torch.tensor(h, device=device)
 
         return data
