@@ -5,6 +5,7 @@ import logging
 
 import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply
+from openfold.utils.loss import compute_fape
 
 from .tools.frame import get_rmsd
 
@@ -28,25 +29,13 @@ class DiffusionModelOptimizer:
     @staticmethod
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor, positions_std: float) -> torch.Tensor:
 
-        # position vectors
-        positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+        fape = compute_fape(
+            frames_pred, frames_true, mask,
+            frames_pred.get_trans(), frames_true.get_trans(), mask,
+            positions_std,
+        )
 
-        # normalize rotation quaternions
-        rotations_true = frames_true.get_rots().get_quats()
-        rotations_pred = frames_pred.get_rots().get_quats()
-
-        rotations_true_norm = torch.sqrt(torch.square(rotations_true).sum(dim=-1))
-        rotations_pred_norm = torch.sqrt(torch.square(rotations_pred).sum(dim=-1))
-
-        rotations_true = rotations_true / rotations_true_norm.unsqueeze(-1)
-        rotations_pred = rotations_pred / rotations_pred_norm.unsqueeze(-1)
-
-        dots = (rotations_pred * rotations_true).sum(dim=-1)
-        angles = torch.acos(dots)
-
-        rotations_loss = torch.square(angles).sum(dim=-1) / mask.sum(dim=-1)
-
-        return positions_loss / positions_std + rotations_loss
+        return fape
 
     @staticmethod
     def combine(signal: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
