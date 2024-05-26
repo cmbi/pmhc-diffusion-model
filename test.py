@@ -63,43 +63,43 @@ class EGNNLayer(torch.nn.Module):
         self.feature_mlp = torch.nn.Sequential(
             torch.nn.Linear((M + H), I),
             torch.nn.ReLU(),
-            torch.nn.Linear(I, I),
-            torch.nn.ReLU(),
             torch.nn.Linear(I, O),
         )
         self.position_mlp = torch.nn.Sequential(
             torch.nn.Linear(M, I),
-            torch.nn.ReLU(),
-            torch.nn.Linear(I, I),
             torch.nn.ReLU(),
             torch.nn.Linear(I, 3),
         )
         self.message_mlp = torch.nn.Sequential(
             torch.nn.Linear(2 * H + 1, I),
             torch.nn.ReLU(),
-            torch.nn.Linear(I, I),
-            torch.nn.ReLU(),
             torch.nn.Linear(I, M),
         )
 
-    def forward(self, frames: torch.Tensor, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        h: torch.Tensor,
+        node_mask: torch.Tensor,
+        edge_mask: torch.Tensor
+    ) -> torch.Tensor:
         """
         Args:
             x: [*, N, 3] (positions)
             h: [*, N, H] (other features)
-            mask: [*, N]
-
+            node_mask: [*, N]
+            edge_mask: [*, N, N]
         Returns:
             updated x: [*, N, 3]
             updated h: [*, N, H]
         """
 
-        N = frames.shape[-2]
+        N = x.shape[-2]
         H = h.shape[-1]
 
         # [*, N, N]
-        mask2 = torch.logical_and(mask.unsqueeze(-2), mask.unsqueeze(-1))
-        mask2 = torch.logical_and(mask2, torch.logical_not(torch.eye(N, N, dtype=torch.bool).unsqueeze(0)))
+        mask2 = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
+        mask2 = torch.logical_and(mask2, edge_mask)
 
         # [N]
         positions = torch.arange(N)
@@ -133,17 +133,18 @@ class Model(torch.nn.Module):
     def __init__(self, M: int, H: int, T: int):
         super().__init__()
 
-        self.posenc = PositionalEncoding(32 - H)
+        self._posenc_size = 34 - H
+        self.posenc = PositionalEncoding(self._posenc_size)
 
         I = 64
 
-        self.frames_mlp = torch.nn.Sequential(
-            torch.nn.Linear(40, I),
-            torch.nn.ReLU(),
-            torch.nn.Linear(I, I),
-            torch.nn.ReLU(),
-            torch.nn.Linear(I, 7),
-        )
+        # 35 + quaternion + time variable = 39
+        self.egnn1 = EGNNLayer(M, 39, I)
+
+        self.act = torch.nn.ReLU()
+
+        # must output a quaternion
+        self.egnn2 = EGNNLayer(M, I, 4)
 
         self.T = T
 
@@ -160,21 +161,28 @@ class Model(torch.nn.Module):
         noised_quats = noised_frames.get_rots().get_quats()
 
         h = batch['features']
-        mask = batch['mask']
+        node_mask = batch['mask']
+
+        # connect residues {1 & 2, 2 & 3, 3 & 4, ...}
+        edge_mask = (torch.abs(
+            torch.arange(node_mask.shape[-1]).unsqueeze(0) -
+            torch.arange(node_mask.shape[-1]).unsqueeze(-1)
+         ) == 1).unsqueeze(0).expand(node_mask.shape[0], node_mask.shape[-1], node_mask.shape[-1])
 
         ft = torch.tensor([[[t / self.T]]]).expand(list(h.shape[:-1]) + [1])
 
         # make residue position features
-        p = self.posenc(torch.zeros(list(h.shape[:-1]) + [32 - h.shape[-1]]))
+        p = self.posenc(torch.zeros(list(h.shape[:-1]) + [self._posenc_size]))
 
-        # input all frames + features to MLP
-        upd = self.frames_mlp(torch.cat((noised_positions, noised_quats, h, p, ft), dim=-1))
+        # input all frames + features to EGNN
+        x = noised_positions
+        h = torch.cat((noised_quats, h, p, ft), dim=-1)
 
-        # predicted noise frames
-        upd_positions = upd[..., 4:]
-        upd_quats = upd[..., :4]
+        x, h = self.egnn1(x, h, node_mask, edge_mask)
+        h = self.act(h)
+        x, h = self.egnn2(x, h, node_mask, edge_mask)
 
-        return Rigid(Rotation(quats=upd_quats, normalize_quats=True), upd_positions)
+        return Rigid(Rotation(quats=h, normalize_quats=True), x)
 
 
 if __name__ == "__main__":
