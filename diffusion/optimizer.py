@@ -27,15 +27,13 @@ class DiffusionModelOptimizer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
     @staticmethod
-    def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor, positions_std: float) -> torch.Tensor:
+    def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        fape = compute_fape(
-            frames_pred, frames_true, mask,
-            frames_pred.get_trans(), frames_true.get_trans(), mask,
-            positions_std,
-        )
+        sd = (frames_true.get_trans() - frames_pred.get_trans()) ** 2
 
-        return fape
+        msd = sd.sum(dim=-1) * mask / mask.sum(dim=-1).unsqueeze(-1)
+
+        return msd
 
     @staticmethod
     def combine(signal: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
@@ -95,7 +93,7 @@ class DiffusionModelOptimizer:
 
         pred_epsilon = self.model(batch, t)
 
-        loss = self.get_loss(epsilon, pred_epsilon, batch["mask"], positions_std).mean()
+        loss = self.get_loss(epsilon, pred_epsilon, batch["mask"]).mean()
         if loss.isnan().any():
             raise RuntimeError("NaN loss")
 
@@ -152,7 +150,6 @@ class DiffusionModelOptimizer:
             )
 
             rmsd = get_rmsd(zt, true_x).mean().item()
-            _log.debug(f"at t={t}, rmsd={rmsd}")
 
             zt = zs
             t = s

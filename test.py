@@ -18,6 +18,7 @@ from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multip
 
 from diffusion.tools.pdb import save
 from diffusion.optimizer import DiffusionModelOptimizer
+from operate import average_rigid
 
 
 _log = logging.getLogger(__name__)
@@ -54,97 +55,70 @@ class PositionalEncoding(torch.nn.Module):
         return self.dropout(x)
 
 
-class EGNNLayer(torch.nn.Module):
+def normalize(v: torch.Tensor) -> torch.Tensor:
+    l = torch.sqrt((v ** 2).sum(dim=-1))
+    return v / l.unsqueeze(-1)
+
+
+class GNNLayer(torch.nn.Module):
     def __init__(self, M: int, H: int, O: int):
         super().__init__()
 
-        I = 64
-
         self.feature_mlp = torch.nn.Sequential(
-            torch.nn.Linear((M + H), I),
-            torch.nn.ReLU(),
-            torch.nn.Linear(I, O),
-        )
-        self.position_mlp = torch.nn.Sequential(
-            torch.nn.Linear(M, I),
-            torch.nn.ReLU(),
-            torch.nn.Linear(I, 3),
+            torch.nn.Linear((M + H), O),
         )
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * H + 1, I),
-            torch.nn.ReLU(),
-            torch.nn.Linear(I, M),
+            torch.nn.Linear(2 * H, M),
         )
 
     def forward(
         self,
-        x: torch.Tensor,
         h: torch.Tensor,
         node_mask: torch.Tensor,
         edge_mask: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> Rigid:
         """
         Args:
-            x: [*, N, 3] (positions)
             h: [*, N, H] (other features)
             node_mask: [*, N]
             edge_mask: [*, N, N]
         Returns:
-            updated x: [*, N, 3]
-            updated h: [*, N, H]
+            updated h: [*, N, O]
         """
 
-        N = x.shape[-2]
+        N = h.shape[-2]
         H = h.shape[-1]
 
         # [*, N, N]
         mask2 = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
         mask2 = torch.logical_and(mask2, edge_mask)
 
-        # [N]
-        positions = torch.arange(N)
-        # [1, N, N, 1]
-        neighbours = (torch.abs(positions.unsqueeze(-2) - positions.unsqueeze(-1)) == 1).unsqueeze(0).unsqueeze(-1)
-
-        # [*, N, N, 3]
-        r = x.unsqueeze(-3) - x.unsqueeze(-2)
-
-        # [*, N, N]
-        d2 = (r ** 2).sum(-1)
-
         # [*, N, N, H]
-        hi = h.unsqueeze(-3).expand(-1, N, -1, -1)
-        hj = h.unsqueeze(-2).expand(-1, -1, N, -1)
+        hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
+        hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
 
         # [*, N, N, M]
-        m = self.message_mlp(torch.cat((hi, hj, d2.unsqueeze(-1)), dim=-1)) * mask2.unsqueeze(-1) * neighbours
+        m = self.message_mlp(torch.cat((hi, hj), dim=-1)) * mask2.unsqueeze(-1)
 
-        # [*, N, N, 3]
-        mx = self.position_mlp(m) * r
+        # [*, N, O]
+        o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
-        x = x + mx.sum(dim=-2) / mask2.float().sum(dim=-1).unsqueeze(-1)
-
-        h = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
-
-        return x, h
+        return o
 
 
 class Model(torch.nn.Module):
     def __init__(self, M: int, H: int, T: int):
         super().__init__()
 
-        self._posenc_size = 34 - H
+        self._posenc_size = 32 - H
         self.posenc = PositionalEncoding(self._posenc_size)
 
         I = 64
 
-        # 35 + quaternion + time variable = 39
-        self.egnn1 = EGNNLayer(M, 39, I)
-
+        # 32 + frame(=7) + time variable = 40
+        self.gnn1 = GNNLayer(M, 40, I)
         self.act = torch.nn.ReLU()
-
-        # must output a quaternion
-        self.egnn2 = EGNNLayer(M, I, 4)
+        self.gnn2 = GNNLayer(M, I, 7)  # output 7 for each frame
 
         self.T = T
 
@@ -156,33 +130,32 @@ class Model(torch.nn.Module):
 
         noised_frames = batch['frames']
 
-        noised_positions = noised_frames.get_trans()
-
-        noised_quats = noised_frames.get_rots().get_quats()
-
-        h = batch['features']
+        node_features = batch['features']
         node_mask = batch['mask']
 
         # connect residues {1 & 2, 2 & 3, 3 & 4, ...}
-        edge_mask = (torch.abs(
-            torch.arange(node_mask.shape[-1]).unsqueeze(0) -
-            torch.arange(node_mask.shape[-1]).unsqueeze(-1)
-         ) == 1).unsqueeze(0).expand(node_mask.shape[0], node_mask.shape[-1], node_mask.shape[-1])
+        edge_mask = (
+            torch.abs(
+                torch.arange(node_mask.shape[-1]).unsqueeze(0) -
+                torch.arange(node_mask.shape[-1]).unsqueeze(-1)
+            ) == 1
+        ).unsqueeze(0).expand(node_mask.shape[0], node_mask.shape[-1], node_mask.shape[-1])
 
-        ft = torch.tensor([[[t / self.T]]]).expand(list(h.shape[:-1]) + [1])
+        ft = torch.tensor([[[t / self.T]]]).expand(list(node_features.shape[:-1]) + [1])
 
         # make residue position features
-        p = self.posenc(torch.zeros(list(h.shape[:-1]) + [self._posenc_size]))
+        p = self.posenc(torch.zeros(list(node_features.shape[:-1]) + [self._posenc_size]))
 
-        # input all frames + features to EGNN
-        x = noised_positions
-        h = torch.cat((noised_quats, h, p, ft), dim=-1)
+        # input all coords + features to GNN
+        h = torch.cat((noised_frames.to_tensor_7(), node_features, p, ft), dim=-1)
 
-        x, h = self.egnn1(x, h, node_mask, edge_mask)
-        h = self.act(h)
-        x, h = self.egnn2(x, h, node_mask, edge_mask)
+        i = self.gnn1(h, node_mask, edge_mask)
+        i = self.act(i)
+        o = self.gnn2(i, node_mask, edge_mask)
 
-        return Rigid(Rotation(quats=h, normalize_quats=True), x)
+        o_frames = Rigid.from_tensor_7(o)
+
+        return o_frames
 
 
 if __name__ == "__main__":
@@ -211,7 +184,7 @@ if __name__ == "__main__":
     dm = DiffusionModelOptimizer(T, model)
 
     # train
-    nepoch = 30
+    nepoch = 10
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
