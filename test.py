@@ -118,7 +118,7 @@ class Model(torch.nn.Module):
         # 32 + frame(=7) + time variable = 40
         self.gnn1 = GNNLayer(M, 40, I)
         self.act = torch.nn.ReLU()
-        self.gnn2 = GNNLayer(M, I, 7)  # output 7 for each frame
+        self.gnn2 = GNNLayer(M, I, 6)  # output 6 for each update vec
 
         self.T = T
 
@@ -151,11 +151,11 @@ class Model(torch.nn.Module):
 
         i = self.gnn1(h, node_mask, edge_mask)
         i = self.act(i)
-        o = self.gnn2(i, node_mask, edge_mask)
+        update_vec = self.gnn2(i, node_mask, edge_mask)
 
-        o_frames = Rigid.from_tensor_7(o)
+        noise_frames = noised_frames.compose_q_update_vec(update_vec)
 
-        return o_frames
+        return noise_frames
 
 
 if __name__ == "__main__":
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     dm = DiffusionModelOptimizer(T, model)
 
     # train
-    nepoch = 10
+    nepoch = 30
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
