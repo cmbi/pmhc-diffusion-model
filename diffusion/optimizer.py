@@ -29,11 +29,13 @@ class DiffusionModelOptimizer:
     @staticmethod
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        sd = (frames_true.get_trans() - frames_pred.get_trans()) ** 2
+        fape = compute_fape(
+            frames_pred, frames_true, mask,
+            frames_pred.get_trans(), frames_true.get_trans(), mask,
+            10.0,
+        )
 
-        msd = sd.sum(dim=-1) * mask / mask.sum(dim=-1).unsqueeze(-1)
-
-        return msd
+        return fape
 
     @staticmethod
     def combine(signal: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
