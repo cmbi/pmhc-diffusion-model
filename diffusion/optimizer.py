@@ -45,14 +45,8 @@ class DiffusionModelOptimizer:
         positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
 
         # normalize rotation quaternions
-        rotations_true = frames_true.get_rots().get_quats()
-        rotations_pred = frames_pred.get_rots().get_quats()
-
-        rotations_true_norm = torch.sqrt(torch.square(rotations_true).sum(dim=-1))
-        rotations_pred_norm = torch.sqrt(torch.square(rotations_pred).sum(dim=-1))
-
-        rotations_true = rotations_true / rotations_true_norm.unsqueeze(-1)
-        rotations_pred = rotations_pred / rotations_pred_norm.unsqueeze(-1)
+        rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
+        rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
 
         dots = (rotations_pred * rotations_true).sum(dim=-1)
         angles = torch.acos(dots)
