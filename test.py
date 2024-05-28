@@ -118,7 +118,15 @@ class Model(torch.nn.Module):
         # 32 + frame(=7) + time variable = 40
         self.gnn1 = GNNLayer(M, 40, I)
         self.act = torch.nn.ReLU()
-        self.gnn2 = GNNLayer(M, I, 6)  # output 6 for each update vec
+        self.gnn2 = GNNLayer(M, I, 7)  # output 7 for frames
+
+        #self.mlp = torch.nn.Sequential(
+        #    torch.nn.Linear(40, I),
+        #    torch.nn.ReLU(),
+        #    torch.nn.Linear(I, I),
+        #    torch.nn.ReLU(),
+        #    torch.nn.Linear(I, 7),
+        #)
 
         self.T = T
 
@@ -129,7 +137,6 @@ class Model(torch.nn.Module):
     ) -> Rigid:
 
         noised_frames = batch['frames']
-
         node_features = batch['features']
         node_mask = batch['mask']
 
@@ -151,9 +158,11 @@ class Model(torch.nn.Module):
 
         i = self.gnn1(h, node_mask, edge_mask)
         i = self.act(i)
-        update_vec = self.gnn2(i, node_mask, edge_mask)
+        o = self.gnn2(i, node_mask, edge_mask)
 
-        noise_frames = noised_frames.compose_q_update_vec(update_vec)
+        #o = self.mlp(h)
+
+        noise_frames = Rigid.from_tensor_7(o)
 
         return noise_frames
 
@@ -184,12 +193,12 @@ if __name__ == "__main__":
     dm = DiffusionModelOptimizer(T, model)
 
     # train
-    nepoch = 30
+    nepoch = 100
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 
         for batch in train_data_loader:
-            dm.optimize(batch, beta_max=0.8)
+            dm.optimize(batch)
 
         torch.save(model.state_dict(), model_path)
 
@@ -208,13 +217,10 @@ if __name__ == "__main__":
     std_pos = true_frames.get_trans().std()
     mean_pos = true_frames.get_trans().mean(dim=frame_dimensions)
 
-    input_frames = Rigid(
-        Rotation(quats=torch.randn([1, true_frames.shape[1], 4]), normalize_quats=True),
-        torch.randn([1, true_frames.shape[1], 3]) * std_pos + mean_pos,
-    )
+    input_frames = dm.gen_noise(true_frames.shape, device=device)
 
     batch = {
-        "frames": input_frames.to_tensor_7(),
+        "frames": input_frames,
         "mask": test_entry["mask"],
         "features": test_entry["features"],
     }
@@ -223,6 +229,6 @@ if __name__ == "__main__":
     save(input_frames[0], "dm-input.pdb")
 
     with torch.no_grad():
-        pred_frames = dm.sample(batch, true_frames)
+        pred_frames = dm.sample(batch)
 
     save(pred_frames[0], "dm-output.pdb")
