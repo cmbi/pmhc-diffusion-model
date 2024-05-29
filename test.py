@@ -162,7 +162,7 @@ class Model(torch.nn.Module):
 
         #o = self.mlp(h)
 
-        noise_frames = Rigid.from_tensor_7(o)
+        noise_frames = Rigid.from_tensor_7(o, normalize_quats=True)
 
         return noise_frames
 
@@ -193,7 +193,7 @@ if __name__ == "__main__":
     dm = DiffusionModelOptimizer(T, model)
 
     # train
-    nepoch = 100
+    nepoch = 300
     for epoch_index in range(nepoch):
         _log.debug(f"starting epoch {epoch_index}")
 

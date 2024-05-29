@@ -18,6 +18,15 @@ def square(x: float) -> float:
     return x * x
 
 
+def partial_rot(rot: Rotation, amount: float) -> Rotation:
+
+    q = rot.get_quats()
+    a = torch.acos(q[..., :1])
+    x = torch.nn.functional.normalize(q[..., 1:], dim=-1)
+
+    return Rotation(quats=torch.cat((torch.cos(a * amount), torch.sin(a * amount) * x), dim=-1), normalize_quats=True)
+
+
 
 class DiffusionModelOptimizer:
 
@@ -27,33 +36,43 @@ class DiffusionModelOptimizer:
         self.model = model
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-        self.beta_min = 0.0001
+        self.beta_min = 0.02
         self.beta_max = 0.8
 
     @staticmethod
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        fape = compute_fape(
-            frames_pred, frames_true, mask,
-            frames_pred.get_trans(), frames_true.get_trans(), mask,
-            1.0,
-        )
+        #fape = compute_fape(
+        #    frames_pred, frames_true, mask,
+        #    frames_pred.get_trans(), frames_true.get_trans(), mask,
+        #    1.0,
+        #)
 
-        return fape
+        #return fape
 
         # position vectors
-        #positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+        positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
 
         # normalize rotation quaternions
-        #rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
-        #rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
+        rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
+        rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
 
-        #dots = (rotations_pred * rotations_true).sum(dim=-1)
-        #angles = torch.acos(dots)
+        dots = (rotations_pred * rotations_true).sum(dim=-1)
+        angles = torch.acos(dots)
 
-        #rotations_loss = torch.square(angles).sum(dim=-1) / mask.sum(dim=-1)
+        rotations_loss = torch.square(angles).sum(dim=-1) / mask.sum(dim=-1)
 
-        #return positions_loss + rotations_loss
+        return positions_loss + rotations_loss
+
+    def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
+
+        beta = self.beta_min + (self.beta_max - self.beta_min) * (float(noise_step) / self.noise_step_count)
+
+        alpha = 1.0 - beta
+
+        sigma = sqrt(1.0 - alpha * alpha)
+
+        return (beta, alpha, sigma)
 
     @staticmethod
     def gen_noise(shape: Union[List[int], Tuple[int]], device: torch.device) -> Rigid:
@@ -74,40 +93,33 @@ class DiffusionModelOptimizer:
 
         return Rigid(Rotation(quats=q), p)
 
-    @staticmethod
-    def add_noise(signal: Rigid, noise: Rigid, alpha: float, sigma: float) -> Rigid:
+    def add_noise(self, signal: Rigid, noise: Rigid, t: int) -> Rigid:
+
+        beta, alpha, sigma = self.get_beta_alpha_sigma(t)
 
         signal_pos = signal.get_trans()
-        signal_quat = signal.get_rots().get_quats()
+        signal_rot = signal.get_rots()
 
         noise_pos = noise.get_trans()
-        noise_quat = noise.get_rots().get_quats()
+        noise_rot = noise.get_rots()
 
-        # mean between positions
+        # noise positions
         pos = signal_pos * alpha + noise_pos * sigma
 
-        # slerp on rotations
-        ll = alpha * alpha + sigma * sigma
-        s_signal = alpha * alpha / ll
-        s_noise = sigma * sigma / ll
+        # noise rotations
+        rot = partial_rot(noise_rot, beta).compose_r(signal_rot)
 
-        dot = (signal_quat * noise_quat).sum(dim=-1)
-        dot = torch.where(dot < 0.0, -dot, dot)
-        angle = torch.acos(dot)
-        quat = signal_quat * (torch.sin(s_signal * angle) / torch.sin(angle)).unsqueeze(-1) + \
-               noise_quat * (torch.sin(s_noise * angle) / torch.sin(angle)).unsqueeze(-1)
+        return Rigid(rot, pos)
 
-        return Rigid(Rotation(quats=quat, normalize_quats=True), pos)
-
-    @staticmethod
     def remove_noise(
+        self,
         noised_signal: Rigid,
         predicted_noise: Rigid,
-        alpha_t: float,
-        sigma_t: float,
-        alpha_s: float,
-        sigma_s: float,
+        t: int, s: int
     ) -> Rigid:
+
+        beta_t, alpha_t, sigma_t = self.get_beta_alpha_sigma(t)
+        beta_s, alpha_s, sigma_s = self.get_beta_alpha_sigma(s)
 
         random_noise = DiffusionModelOptimizer.gen_noise(noised_signal.shape, noised_signal.device)
 
@@ -127,22 +139,19 @@ class DiffusionModelOptimizer:
                        sigma_t2s * random_noise_pos
 
         # denoisify rotation
-        noised_signal_quat = torch.nn.functional.normalize(noised_signal.get_rots().get_quats(), dim=-1)
-        predicted_noise_quat = torch.nn.functional.normalize(predicted_noise.get_rots().get_quats(), dim=-1)
-        random_noise_quat = torch.nn.functional.normalize(random_noise.get_rots().get_quats(), dim=-1)
+        noised_signal_rot = noised_signal.get_rots()
+        predicted_noise_rot = predicted_noise.get_rots()
+        random_noise_rot = random_noise.get_rots()
 
-        noised_signal_matrix = noised_signal_quat[..., None] * noised_signal_quat[..., None, :]
-        predicted_noise_matrix = predicted_noise_quat[..., None] * predicted_noise_quat[..., None, :]
-        random_noise_matrix = random_noise_quat[..., None] * random_noise_quat[..., None, :]
+        denoised_rot = partial_rot(random_noise_rot, beta_s).compose_r(
+            partial_rot(predicted_noise_rot, beta_t).invert().compose_r(noised_signal_rot)
+        )
 
-        denoised_matrix = noised_signal_matrix / alpha_ts - \
-                          (predicted_noise_matrix * sqr_sigma_ts) / (alpha_ts * sigma_t) + \
-                          sigma_t2s * random_noise_matrix
+        print('zt', noised_signal_rot.get_quats()[0, 0, :], noised_signal_rot.get_quats()[0, 4, :])
+        print('p', predicted_noise_rot.get_quats()[0, 0, :], predicted_noise_rot.get_quats()[0, 4, :])
+        print('e', random_noise_rot.get_quats()[0, 0, :], random_noise_rot.get_quats()[0, 4, :])
 
-        _, eigen_vectors = torch.linalg.eig(denoised_matrix)
-
-        return Rigid(Rotation(quats=eigen_vectors[..., 0].real, normalize_quats=True), denoised_pos)
-        #return Rigid(Rotation.identity(noised_signal.shape), denoised_pos)
+        return Rigid(denoised_rot, denoised_pos)
 
     def optimize(self, batch: Dict[str, Union[Rigid, torch.Tensor]]):
 
@@ -155,12 +164,7 @@ class DiffusionModelOptimizer:
 
         epsilon = self.gen_noise(frames.shape, frames.device)
 
-        beta_delta = self.beta_max - self.beta_min
-        beta = self.beta_min + beta_delta * t / self.noise_step_count
-        alpha = 1.0 - beta
-        sigma = sqrt(1.0 - square(alpha))
-
-        zt = self.add_noise(frames, epsilon, alpha, sigma)
+        zt = self.add_noise(frames, epsilon, t)
 
         batch = {
             "frames": zt,
@@ -174,7 +178,7 @@ class DiffusionModelOptimizer:
         if loss.isnan().any():
             raise RuntimeError("NaN loss")
 
-        _log.debug(f"beta is {beta:.3f}, loss is {loss:.3f}")
+        _log.debug(f"loss is {loss:.3f}")
 
         loss.backward()
 
@@ -191,20 +195,6 @@ class DiffusionModelOptimizer:
 
             s = t - 1
 
-            beta_t = self.beta_min + beta_delta * t / self.noise_step_count
-            alpha_t = 1.0 - beta_t
-            sigma_t = sqrt(1.0 - square(alpha_t))
-
-            if sigma_t == 0.0:
-                raise RuntimeError("zero sigma")
-
-            beta_s = self.beta_min + beta_delta * s / self.noise_step_count
-            alpha_s = 1.0 - beta_s
-            sigma_s = sqrt(1.0 - square(alpha_s))
-
-            if alpha_s == 0.0:
-                raise RuntimeError("zero alpha")
-
             batch = {
                 "frames": zt,
                 "mask": batch["mask"],
@@ -213,8 +203,7 @@ class DiffusionModelOptimizer:
 
             zs = self.remove_noise(
                 zt, self.model(batch, t),
-                alpha_t, sigma_t,
-                alpha_s, sigma_s,
+                t, s,
             )
 
             if t % 100 == 0:
