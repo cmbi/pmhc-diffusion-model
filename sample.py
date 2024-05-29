@@ -38,8 +38,8 @@ if __name__ == "__main__":
     _log.debug(f"initializing model")
     T = 1000
     model = Model(16, 22, T).to(device=device)
-    if os.path.isfile("model.pth"):
-        model.load_state_dict(torch.load("model.pth", map_location=device))
+    if os.path.isfile(args.model):
+        model.load_state_dict(torch.load(args.model, map_location=device))
 
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
