@@ -11,7 +11,7 @@ from openfold.utils.rigid_utils import Rigid, Rotation
 from openfold.np.residue_constants import rigid_group_atom_positions
 
 
-def save(frames: Rigid, path: str):
+def save(frames: Rigid, mask: torch.Tensor, path: str):
 
     structure = Structure("")
     model = PDBModel(0)
@@ -19,24 +19,26 @@ def save(frames: Rigid, path: str):
     chain = Chain('A')
     model.add(chain)
     for i in range(frames.shape[0]):
-        frame = frames[i]
+        if mask[i]:
 
-        # normalize quaternions
-        trans = frame.get_trans()
-        quats = frame.get_rots().get_quats()
-        frame = Rigid(Rotation(quats=quats, normalize_quats=True), trans)
+            frame = frames[i]
 
-        res = Residue(("A", i + 1, " "), "ALA", "A")
-        chain.add(res)
+            # normalize quaternions
+            trans = frame.get_trans()
+            quats = frame.get_rots().get_quats()
+            frame = Rigid(Rotation(quats=quats, normalize_quats=True), trans)
 
-        for atom_name, group_id, p in rigid_group_atom_positions["ALA"]:
+            res = Residue(("A", i + 1, " "), "ALA", "A")
+            chain.add(res)
 
-            if group_id == 0:
+            for atom_name, group_id, p in rigid_group_atom_positions["ALA"]:
 
-                p = frame.apply(torch.tensor(p))
+                if group_id == 0:
 
-                atom = Atom(atom_name, p, 0.0, 1.0, ' ', f" {atom_name} ", atom_name[0])
-                res.add(atom)
+                    p = frame.apply(torch.tensor(p))
+
+                    atom = Atom(atom_name, p, 0.0, 1.0, ' ', f" {atom_name} ", atom_name[0])
+                    res.add(atom)
 
     io = PDBIO()
     io.set_structure(structure)

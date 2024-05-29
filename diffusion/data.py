@@ -13,8 +13,7 @@ from openfold.utils.rigid_utils import Rigid
 
 class MhcpDataset(Dataset):
 
-    protein_size = 200
-    peptide_size = 9
+    peptide_maxlen = 16
 
     def __init__(self, hdf5_path: str, device: Optional[torch.device] = None):
 
@@ -33,26 +32,36 @@ class MhcpDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entry_names)
 
-    @staticmethod
-    def _get_entry(hdf5_path: str, entry_name: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    def _get_entry(self, hdf5_path: str, entry_name: str, device: torch.device) -> Dict[str, torch.Tensor]:
 
         data = {}
         with h5py.File(hdf5_path, 'r') as f5:
             entry = f5[entry_name]
 
+            if "peptide" not in entry:
+                raise ValueError(f"no peptide in {entry_name}")
+
             peptide = entry["peptide"]
 
             # backbone rotation(quaternion) + c-alpha xyz
-            frames = peptide['backbone_rigid_tensor'][:]
+            frames_data = peptide['backbone_rigid_tensor'][:]
+
+            peptide_len = frames_data.shape[0]
+
+            frames = torch.zeros([MhcpDataset.peptide_maxlen, 4, 4], device=self.device)
+            frames[:peptide_len, :, :] = torch.tensor(frames_data, device=self.device)
 
             # backbone reswise mask
-            mask = peptide['backbone_rigid_mask'][:]
+            mask = torch.zeros(MhcpDataset.peptide_maxlen, device=self.device, dtype=torch.bool)
+            mask[:peptide_len] = True
 
             # one-hot encoded amino acid sequence
-            h = peptide['sequence_onehot'][:]
+            onehot = torch.zeros([MhcpDataset.peptide_maxlen, 22], device=self.device)
+            onehot[:peptide_len, :] = torch.tensor(peptide['sequence_onehot'][:], device=self.device)
 
-            data['mask'] = torch.tensor(mask, device=device)
-            data['frames'] = Rigid.from_tensor_4x4(torch.tensor(frames, device=device)).to_tensor_7()  # convert to tensor, for collation
-            data['features'] = torch.tensor(h, device=device)
+            # output dict
+            data['mask'] = mask
+            data['frames'] = Rigid.from_tensor_4x4(frames).to_tensor_7()  # convert to tensor, for collation
+            data['features'] = onehot
 
         return data

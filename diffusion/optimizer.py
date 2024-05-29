@@ -206,9 +206,6 @@ class DiffusionModelOptimizer:
                 t, s,
             )
 
-            if t % 100 == 0:
-                save(zs[0], f"dm-output-{t}.pdb")
-
             zt = zs
             t = s
 
