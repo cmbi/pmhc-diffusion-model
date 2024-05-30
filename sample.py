@@ -19,6 +19,7 @@ _log = logging.getLogger(__name__)
 arg_parser = ArgumentParser()
 arg_parser.add_argument("model")
 arg_parser.add_argument("test_hdf5")
+arg_parser.add_argument("id")
 
 if __name__ == "__main__":
 
@@ -48,7 +49,7 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(args.model, map_location=device))
 
     test_dataset = MhcpDataset(args.test_hdf5, device)
-    test_entry = test_dataset[0]
+    test_entry = test_dataset.get_entry(args.id)
 
     # for sampling, make a batch of size 1
     test_entry = {key: test_entry[key].unsqueeze(0) for key in test_entry}
@@ -64,10 +65,10 @@ if __name__ == "__main__":
         "features": test_entry["features"],
     }
 
-    save(true_frames[0], test_entry["mask"][0], "dm-true.pdb")
-    save(input_frames[0], test_entry["mask"][0], "dm-input.pdb")
+    save(true_frames[0], test_entry["mask"][0], f"{args.id}-true.pdb")
+    save(input_frames[0], test_entry["mask"][0], f"{args.id}-input.pdb")
 
     with torch.no_grad():
         pred_frames = dm.sample(batch)
 
-    save(pred_frames[0], test_entry["mask"][0], "dm-output.pdb")
+    save(pred_frames[0], test_entry["mask"][0], f"{args.id}-output.pdb")
