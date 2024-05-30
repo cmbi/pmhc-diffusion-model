@@ -27,15 +27,15 @@ class MhcpDataset(Dataset):
             self.entry_names = list(f5.keys())
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
-        return self._get_entry(self.hdf5_path, self.entry_names[index], self.device)
+        return self.get_entry(self.entry_names[index])
 
     def __len__(self) -> int:
         return len(self.entry_names)
 
-    def _get_entry(self, hdf5_path: str, entry_name: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    def get_entry(self, entry_name: str) -> Dict[str, torch.Tensor]:
 
         data = {}
-        with h5py.File(hdf5_path, 'r') as f5:
+        with h5py.File(self.hdf5_path, 'r') as f5:
             entry = f5[entry_name]
 
             if "peptide" not in entry:
