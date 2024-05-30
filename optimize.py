@@ -55,7 +55,12 @@ if __name__ == "__main__":
     for epoch_index in range(args.epoch_count):
         _log.debug(f"starting epoch {epoch_index}")
 
-        for batch in train_data_loader:
+        for i, batch in enumerate(train_data_loader):
             dm.optimize(batch)
 
+            if i > 0 and i % 1000 == 0:
+                torch.save(model.state_dict(), args.output_model)
+                _log.debug(f"saved {args.output_model}")
+
         torch.save(model.state_dict(), args.output_model)
+        _log.debug(f"saved {args.output_model}")
