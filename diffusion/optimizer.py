@@ -27,6 +27,22 @@ def partial_rot(rot: Rotation, amount: float) -> Rotation:
     return Rotation(quats=torch.cat((torch.cos(a * amount), torch.sin(a * amount) * x), dim=-1), normalize_quats=True)
 
 
+def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+
+    w = (q1[..., 0] * q2[..., 0] - q1[..., 1] * q2[..., 1] - q1[..., 2] * q2[..., 2] - q1[..., 3] * q2[..., 3]).unsqueeze(-1)
+    x = (q1[..., 2] * q2[..., 3] - q1[..., 3] * q2[..., 2] + q1[..., 1] * q2[..., 0] + q1[..., 0] * q2[..., 1]).unsqueeze(-1)
+    y = (q1[..., 3] * q2[..., 0] - q1[..., 0] * q2[..., 3] + q1[..., 2] * q2[..., 0] + q1[..., 0] * q2[..., 2]).unsqueeze(-1)
+    z = (q1[..., 1] * q2[..., 2] - q1[..., 2] * q2[..., 1] + q1[..., 3] * q2[..., 0] + q1[..., 0] * q2[..., 3]).unsqueeze(-1)
+
+    qx = torch.cat((w, x, y, z), dim=-1)
+
+    return qx
+
+
+def conjugate(q: torch.Tensor) -> torch.Tensor:
+
+    return torch.cat((q[..., :1], -q[..., 1:]), dim=-1)
+
 
 class DiffusionModelOptimizer:
 
@@ -42,14 +58,6 @@ class DiffusionModelOptimizer:
     @staticmethod
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        #fape = compute_fape(
-        #    frames_pred, frames_true, mask,
-        #    frames_pred.get_trans(), frames_true.get_trans(), mask,
-        #    1.0,
-        #)
-
-        #return fape
-
         # position vectors
         positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
 
@@ -57,10 +65,11 @@ class DiffusionModelOptimizer:
         rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
         rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
 
-        dots = (rotations_pred * rotations_true).sum(dim=-1)
-        angles = torch.acos(dots)
+        # when pred == true, q*q is a unit quaternion
+        qq = quat_multiply(conjugate(rotations_pred), rotations_true)
+        unit = torch.tensor([1.0, 0.0, 0.0, 0.0], device=qq.device)
 
-        rotations_loss = torch.square(angles).sum(dim=-1) / mask.sum(dim=-1)
+        rotations_loss = ((qq - unit) ** 2).sum(dim=(-2, -1)) / mask.sum(dim=-1)
 
         return positions_loss + rotations_loss
 
@@ -146,10 +155,6 @@ class DiffusionModelOptimizer:
         denoised_rot = partial_rot(random_noise_rot, beta_s).compose_r(
             partial_rot(predicted_noise_rot, beta_t).invert().compose_r(noised_signal_rot)
         )
-
-        print('zt', noised_signal_rot.get_quats()[0, 0, :], noised_signal_rot.get_quats()[0, 4, :])
-        print('p', predicted_noise_rot.get_quats()[0, 0, :], predicted_noise_rot.get_quats()[0, 4, :])
-        print('e', random_noise_rot.get_quats()[0, 0, :], random_noise_rot.get_quats()[0, 4, :])
 
         return Rigid(denoised_rot, denoised_pos)
 
