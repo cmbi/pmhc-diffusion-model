@@ -1,3 +1,5 @@
+import logging
+
 from Bio.PDB.Structure import Structure
 from Bio.PDB.Model import Model as PDBModel
 from Bio.PDB.Chain import Chain
@@ -9,6 +11,9 @@ import torch
 
 from openfold.utils.rigid_utils import Rigid, Rotation
 from openfold.np.residue_constants import rigid_group_atom_positions
+
+
+_log = logging.getLogger(__name__)
 
 
 def save(frames: Rigid, mask: torch.Tensor, path: str):
@@ -43,4 +48,6 @@ def save(frames: Rigid, mask: torch.Tensor, path: str):
     io = PDBIO()
     io.set_structure(structure)
     io.save(path)
+
+    _log.debug(f"saved {path}")
 
