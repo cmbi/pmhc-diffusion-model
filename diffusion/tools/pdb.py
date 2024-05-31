@@ -23,6 +23,7 @@ def save(frames: Rigid, mask: torch.Tensor, path: str):
     structure.add(model)
     chain = Chain('A')
     model.add(chain)
+    n = 0
     for i in range(frames.shape[0]):
         if mask[i]:
 
@@ -42,7 +43,8 @@ def save(frames: Rigid, mask: torch.Tensor, path: str):
 
                     p = frame.apply(torch.tensor(p))
 
-                    atom = Atom(atom_name, p, 0.0, 1.0, ' ', f" {atom_name} ", atom_name[0])
+                    n += 1
+                    atom = Atom(atom_name, p, 0.0, 1.0, ' ', f" {atom_name} ", n, element=atom_name[0])
                     res.add(atom)
 
     io = PDBIO()
