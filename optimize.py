@@ -58,7 +58,7 @@ if __name__ == "__main__":
         for i, batch in enumerate(train_data_loader):
             dm.optimize(batch)
 
-            if i > 0 and i % 1000 == 0:
+            if i > 0 and i % 100 == 0:
                 torch.save(model.state_dict(), args.output_model)
                 _log.debug(f"saved {args.output_model}")
 
