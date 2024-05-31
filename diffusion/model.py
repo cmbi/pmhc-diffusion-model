@@ -6,52 +6,30 @@ import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply_by_vec
 
 
-class PositionalEncoding(torch.nn.Module):
-
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        super().__init__()
-        self.dropout = torch.nn.Dropout(p=dropout)
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-log(10000.0) / d_model))
-        pe = torch.zeros(1, max_len, d_model)
-        pe[0, :, 0::2] = torch.sin(position * div_term)
-        pe[0, :, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[*, N, d]``
-        """
-        x = x + self.pe[:, :x.shape[-2], :]
-        return self.dropout(x)
-
-
 class GNNLayer(torch.nn.Module):
-    def __init__(self, M: int, H: int, O: int):
+    def __init__(self, node_input_size: int, edge_input_size: int, node_output_size: int, message_size: int):
         super().__init__()
 
         self.feature_mlp = torch.nn.Sequential(
-            torch.nn.Linear((M + H), O),
+            torch.nn.Linear((node_input_size + message_size), node_output_size),
         )
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * H, M),
+            torch.nn.Linear(2 * node_input_size + edge_input_size, message_size),
         )
 
     def forward(
         self,
         h: torch.Tensor,
+        e: torch.Tensor,
         node_mask: torch.Tensor,
-        edge_mask: torch.Tensor
     ) -> Rigid:
         """
         Args:
-            h: [*, N, H] (other features)
+            h: [*, N, H] (node features)
+            e: [*, N, N, E] (edge features)
             node_mask: [*, N]
-            edge_mask: [*, N, N]
         Returns:
-            updated h: [*, N, O]
+            updated node features: [*, N, O]
         """
 
         N = h.shape[-2]
@@ -59,14 +37,13 @@ class GNNLayer(torch.nn.Module):
 
         # [*, N, N]
         mask2 = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
-        mask2 = torch.logical_and(mask2, edge_mask)
 
         # [*, N, N, H]
         hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
         hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
 
         # [*, N, N, M]
-        m = self.message_mlp(torch.cat((hi, hj), dim=-1)) * mask2.unsqueeze(-1)
+        m = self.message_mlp(torch.cat((hi, hj, e), dim=-1)) * mask2.unsqueeze(-1)
 
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
@@ -75,18 +52,43 @@ class GNNLayer(torch.nn.Module):
 
 
 class Model(torch.nn.Module):
-    def __init__(self, M: int, H: int, T: int):
+    def __init__(self, max_len: int, sequence_onehot_depth: int, T: int):
         super().__init__()
 
-        self._posenc_size = 32 - H
-        self.posenc = PositionalEncoding(self._posenc_size)
+        self.max_len = max_len
+
+        relposenc_depth = max_len * 2 - 1
+
+        # [N]
+        relposenc_range = torch.arange(max_len)
+
+        # [N, N]
+        relative_positions = (max_len - 1) + (relposenc_range[:, None] - relposenc_range[None, :])
+
+        # [N, N, depth]
+        self.relative_position_encodings = torch.nn.functional.one_hot(relative_positions, num_classes=relposenc_depth)
+
+        # node features: 22 + frame(=7) + time variable
+        H = sequence_onehot_depth + 7 + 1
+
+        # edge features: position encoding + bonded
+        E = relposenc_depth
 
         I = 64
+        M = 16
+        J = 128
 
-        # 32 + frame(=7) + time variable = 40
-        self.gnn1 = GNNLayer(M, 40, I)
+        self.gnn1 = GNNLayer(H, E, I, M)
+        self.gnn2 = GNNLayer(I, E, I, M)
+        self.gnn3 = GNNLayer(I, E, I, M)
+        self.gnn4 = GNNLayer(I, E, I, M)
         self.act = torch.nn.ReLU()
-        self.gnn2 = GNNLayer(M, I, 7)  # output 7 for frames
+
+        self.trans = torch.nn.Sequential(
+            torch.nn.Linear(I, J),
+            torch.nn.ReLU(),
+            torch.nn.Linear(J, 7),
+        )
 
         self.T = T
 
@@ -100,27 +102,24 @@ class Model(torch.nn.Module):
         node_features = batch['features']
         node_mask = batch['mask']
 
-        # connect residues {1 & 2, 2 & 3, 3 & 4, ...}
-        edge_mask = (
-            torch.abs(
-                torch.arange(node_mask.shape[-1]).unsqueeze(0) -
-                torch.arange(node_mask.shape[-1]).unsqueeze(-1)
-            ) == 1
-        ).unsqueeze(0).expand(node_mask.shape[0], node_mask.shape[-1], node_mask.shape[-1])
+        batch_size = node_mask.shape[0]
 
-        ft = torch.tensor([[[t / self.T]]]).expand(list(node_features.shape[:-1]) + [1])
-
-        # make residue position features
-        p = self.posenc(torch.zeros(list(node_features.shape[:-1]) + [self._posenc_size]))
+        ft = torch.tensor([[[t / self.T]]]).expand(batch_size, self.max_len, 1)
 
         # input all coords + features to GNN
-        h = torch.cat((noised_frames.to_tensor_7(), node_features, p, ft), dim=-1)
+        h = torch.cat((noised_frames.to_tensor_7(), node_features, ft), dim=-1)
+        e = self.relative_position_encodings.clone().unsqueeze(0).expand(batch_size, -1, -1, -1)
 
-        i = self.gnn1(h, node_mask, edge_mask)
+        i = self.gnn1(h, e, node_mask)
         i = self.act(i)
-        o = self.gnn2(i, node_mask, edge_mask)
+        i = self.gnn2(i, e, node_mask)
+        i = self.act(i)
+        i = self.gnn3(i, e, node_mask)
+        i = self.act(i)
+        i = self.gnn4(i, e, node_mask)
+        i = self.act(i)
 
-        #o = self.mlp(h)
+        o = self.trans(i)
 
         noise_frames = Rigid.from_tensor_7(o, normalize_quats=True)
 
