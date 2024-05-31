@@ -20,11 +20,12 @@ def square(x: float) -> float:
 
 def partial_rot(rot: Rotation, amount: float) -> Rotation:
 
-    q = rot.get_quats()
-    a = torch.acos(q[..., :1])
+    q = torch.nn.functional.normalize(rot.get_quats())
+    a2 = torch.acos(torch.clamp(q[..., :1], -1.0, 1.0))
+    a = torch.where(a2 * 2 > pi, a2 * 2 - 2 * pi, a2 * 2)
     x = torch.nn.functional.normalize(q[..., 1:], dim=-1)
 
-    return Rotation(quats=torch.cat((torch.cos(a * amount), torch.sin(a * amount) * x), dim=-1), normalize_quats=True)
+    return Rotation(quats=torch.cat((torch.cos(a / 2 * amount), torch.sin(a / 2 * amount) * x), dim=-1), normalize_quats=False)
 
 
 def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
@@ -52,24 +53,21 @@ class DiffusionModelOptimizer:
         self.model = model
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-        self.beta_min = 0.02
+        self.beta_min = 0.0001
         self.beta_max = 0.8
 
     @staticmethod
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        # position vectors
-        positions_loss = torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+        # position square deviation
+        positions_loss = (torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=-1) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
-        # normalize rotation quaternions
+        # rotation square deviation
         rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
         rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
 
-        # when pred == true, q*q is a unit quaternion
-        qq = quat_multiply(conjugate(rotations_pred), rotations_true)
-        unit = torch.tensor([1.0, 0.0, 0.0, 0.0], device=qq.device)
-
-        rotations_loss = ((qq - unit) ** 2).sum(dim=(-2, -1)) / mask.sum(dim=-1)
+        dots = (rotations_pred * rotations_true).sum(dim=-1)
+        rotations_loss = (torch.square(1.0 - torch.abs(dots)) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
         return positions_loss + rotations_loss
 
