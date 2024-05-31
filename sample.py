@@ -32,8 +32,6 @@ if __name__ == "__main__":
         device = torch.device("cuda")
 
     # init
-    torch.autograd.detect_anomaly(check_nan=True)
-
     test_dataset = MhcpDataset(args.test_hdf5, device)
 
     _log.debug(f"initializing model")

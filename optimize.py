@@ -24,6 +24,7 @@ arg_parser = ArgumentParser()
 arg_parser.add_argument("train_hdf5")
 arg_parser.add_argument("epoch_count", type=int)
 arg_parser.add_argument("output_model")
+arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False)
 
 
 if __name__ == "__main__":
@@ -37,7 +38,8 @@ if __name__ == "__main__":
         device = torch.device("cuda")
 
     # init
-    torch.autograd.detect_anomaly(check_nan=True)
+    if args.debug:
+        torch.autograd.detect_anomaly(check_nan=True)
 
     _log.debug(f"initializing model")
     T = 1000
