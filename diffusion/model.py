@@ -67,14 +67,14 @@ class EGNNLayer(torch.nn.Module):
         global_to_local = Rigid.from_tensor_7(frames.invert().to_tensor_7()[..., None, :, :].expand(conv_shape))
 
         # [*, N, N, 7]
-        delta = self.frame_mlp(m) * message_mask[..., None] / (n_nodes[:, None, None, None] - 1)
+        delta = self.frame_mlp(m) * message_mask[..., None]
         delta = torch.where(delta.isnan(), 0.0, delta)
 
         # [*, N, 3]
         x = (local_to_global.apply(global_to_local.apply(x[..., :, None, :]) + delta[..., 4:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
 
         # [*, N, 4]
-        q = q + (q[..., :, None, :] * delta[..., :4]).sum(dim=-2)
+        q = q + (q[..., :, None, :] * delta[..., :4]).sum(dim=-2) / (n_nodes[:, None, None] - 1)
 
         return Rigid(Rotation(quats=q, normalize_quats=True), x), o
 
