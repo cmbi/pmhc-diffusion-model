@@ -31,16 +31,18 @@ if __name__ == "__main__":
 
     args = arg_parser.parse_args()
 
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+    log_level = logging.INFO
+    if args.debug:
+        torch.autograd.detect_anomaly(check_nan=True)
+        log_level = logging.DEBUG
+
+    logging.basicConfig(stream=sys.stdout, level=log_level)
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda")
 
     # init
-    if args.debug:
-        torch.autograd.detect_anomaly(check_nan=True)
-
     _log.debug(f"initializing model")
     T = 1000
     model = Model(16, 22, T).to(device=device)
