@@ -60,16 +60,22 @@ class DiffusionModelOptimizer:
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
         # position square deviation
-        positions_loss = (torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=-1) * mask).sum(dim=-1) / mask.sum(dim=-1)
+        #positions_loss = (torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=-1) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
         # rotation square deviation
-        rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
-        rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
+        #rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
+        #rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
 
-        dots = (rotations_pred * rotations_true).sum(dim=-1)
-        rotations_loss = (torch.square(1.0 - torch.abs(dots)) * mask).sum(dim=-1) / mask.sum(dim=-1)
+        #dots = (rotations_pred * rotations_true).sum(dim=-1)
+        #rotations_loss = (torch.square(1.0 - torch.abs(dots)) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
-        return positions_loss + rotations_loss
+        #return positions_loss + rotations_loss
+
+        return compute_fape(
+            frames_pred, frames_true, mask,
+            frames_pred.get_trans(), frames_true.get_trans(), mask,
+            1.0
+        )
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
