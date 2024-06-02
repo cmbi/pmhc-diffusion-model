@@ -6,29 +6,29 @@ import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply_by_vec
 
 
-class GNNLayer(torch.nn.Module):
+class EGNNLayer(torch.nn.Module):
     def __init__(self, node_input_size: int, edge_input_size: int, node_output_size: int, message_size: int):
         super().__init__()
 
-        self.feature_mlp = torch.nn.Sequential(
-            torch.nn.Linear((node_input_size + message_size), node_output_size),
-        )
-        self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * node_input_size + edge_input_size, message_size),
-        )
+        self.feature_mlp = torch.nn.Linear((node_input_size + message_size), node_output_size)
+        self.message_mlp = torch.nn.Linear(2 * node_input_size + edge_input_size + 2, message_size)
+        self.frame_mlp = torch.nn.Linear(message_size, 7)
 
     def forward(
         self,
+        frames: Rigid,
         h: torch.Tensor,
         e: torch.Tensor,
         node_mask: torch.Tensor,
     ) -> Rigid:
         """
         Args:
-            h: [*, N, H] (node features)
-            e: [*, N, N, E] (edge features)
-            node_mask: [*, N]
+            frames:     [*, N]
+            h:          [*, N, H] (node features)
+            e:          [*, N, N, E] (edge features)
+            node_mask:  [*, N]
         Returns:
+            updated frames:        [*, N]
             updated node features: [*, N, O]
         """
 
@@ -36,19 +36,47 @@ class GNNLayer(torch.nn.Module):
         H = h.shape[-1]
 
         # [*, N, N]
-        mask2 = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
+        message_mask = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
+        message_mask = torch.logical_and(message_mask, torch.logical_not(torch.eye(node_mask.shape[-1], device=node_mask.device)[None, ...]))
+
+        # [*]
+        n_nodes = node_mask.sum(dim=-1)
+
+        # [*, N, 3]
+        x = frames.get_trans()
+
+        # [*, N, 4]
+        q = frames.get_rots().get_quats()
+
+        # [*, N, N, 1]
+        d2 = torch.square(x[:, :, None, :] - x[:, None, :, :]).sum(dim=-1)
+        dot = (q[..., :, None, :] * q[..., None, :, :]).sum(dim=-1).abs()
 
         # [*, N, N, H]
         hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
         hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
 
         # [*, N, N, M]
-        m = self.message_mlp(torch.cat((hi, hj, e), dim=-1)) * mask2.unsqueeze(-1)
+        m = self.message_mlp(torch.cat((hi, hj, e, d2[..., None], dot[..., None]), dim=-1)) * message_mask[..., None]
 
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
-        return o
+        conv_shape = list(frames.shape) + [frames.shape[-1], 7]
+        local_to_global = Rigid.from_tensor_7(frames.to_tensor_7()[..., None, :, :].expand(conv_shape))
+        global_to_local = Rigid.from_tensor_7(frames.invert().to_tensor_7()[..., None, :, :].expand(conv_shape))
+
+        # [*, N, N, 7]
+        delta = self.frame_mlp(m) * message_mask[..., None] / (n_nodes[:, None, None, None] - 1)
+        delta = torch.where(delta.isnan(), 0.0, delta)
+
+        # [*, N, 3]
+        x = (local_to_global.apply(global_to_local.apply(x[..., :, None, :]) + delta[..., 4:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+
+        # [*, N, 4]
+        q = q + (q[..., :, None, :] * delta[..., :4]).sum(dim=-2)
+
+        return Rigid(Rotation(quats=q, normalize_quats=True), x), o
 
 
 class Model(torch.nn.Module):
@@ -76,19 +104,11 @@ class Model(torch.nn.Module):
 
         I = 64
         M = 16
-        J = 128
 
-        self.gnn1 = GNNLayer(H, E, I, M)
-        self.gnn2 = GNNLayer(I, E, I, M)
-        self.gnn3 = GNNLayer(I, E, I, M)
-        self.gnn4 = GNNLayer(I, E, I, M)
+        self.gnn1 = EGNNLayer(H, E, I, M)
+        self.gnn2 = EGNNLayer(I, E, I, M)
+
         self.act = torch.nn.ReLU()
-
-        self.trans = torch.nn.Sequential(
-            torch.nn.Linear(I, J),
-            torch.nn.ReLU(),
-            torch.nn.Linear(J, 7),
-        )
 
         self.T = T
 
@@ -110,17 +130,8 @@ class Model(torch.nn.Module):
         h = torch.cat((noised_frames.to_tensor_7(), node_features, ft), dim=-1)
         e = self.relative_position_encodings.clone().unsqueeze(0).expand(batch_size, -1, -1, -1)
 
-        i = self.gnn1(h, e, node_mask)
+        frames, i = self.gnn1(noised_frames, h, e, node_mask)
         i = self.act(i)
-        i = self.gnn2(i, e, node_mask)
-        i = self.act(i)
-        i = self.gnn3(i, e, node_mask)
-        i = self.act(i)
-        i = self.gnn4(i, e, node_mask)
-        i = self.act(i)
+        frames, i = self.gnn2(frames, i, e, node_mask)
 
-        o = self.trans(i)
-
-        noise_frames = Rigid.from_tensor_7(o, normalize_quats=True)
-
-        return noise_frames
+        return frames
