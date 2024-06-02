@@ -48,7 +48,7 @@ class MhcpDataset(Dataset):
 
             peptide_len = frames_data.shape[0]
 
-            frames = torch.zeros([MhcpDataset.peptide_maxlen, 4, 4], device=self.device)
+            frames = torch.eye(4, 4, device=self.device).unsqueeze(-3).expand(MhcpDataset.peptide_maxlen, 4, 4).clone()
             frames[:peptide_len, :, :] = torch.tensor(frames_data, device=self.device)
 
             # backbone reswise mask
