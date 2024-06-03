@@ -11,7 +11,7 @@ class EGNNLayer(torch.nn.Module):
         super().__init__()
 
         self.feature_mlp = torch.nn.Linear((node_input_size + message_size), node_output_size)
-        self.message_mlp = torch.nn.Linear(2 * node_input_size + edge_input_size + 2, message_size)
+        self.message_mlp = torch.nn.Linear(2 * node_input_size + edge_input_size + 9, message_size)
         self.frame_mlp = torch.nn.Linear(message_size, 7)
 
     def forward(
@@ -48,30 +48,38 @@ class EGNNLayer(torch.nn.Module):
         # [*, N, 4]
         q = frames.get_rots().get_quats()
 
+        conv_shape = list(frames.shape) + [frames.shape[-1], 7]
+
+        # [*, N, N]
+        local_to_global = Rigid.from_tensor_7(frames.to_tensor_7()[..., None, :, :].expand(conv_shape))
+        global_to_local = Rigid.from_tensor_7(frames.invert().to_tensor_7()[..., None, :, :].expand(conv_shape))
+
         # [*, N, N, 1]
         d2 = torch.square(x[:, :, None, :] - x[:, None, :, :]).sum(dim=-1)
         dot = (q[..., :, None, :] * q[..., None, :, :]).sum(dim=-1).abs()
+
+        # [*, N, N, 3]
+        local_x = global_to_local.apply(x[..., :, None, :])
+
+        # [*, N, N, 4]
+        local_q = global_to_local.get_rots().get_quats() * q[..., :, None, :] * local_to_global.get_rots().get_quats()
 
         # [*, N, N, H]
         hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
         hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
 
         # [*, N, N, M]
-        m = self.message_mlp(torch.cat((hi, hj, e, d2[..., None], dot[..., None]), dim=-1)) * message_mask[..., None]
+        m = self.message_mlp(torch.cat((hi, hj, e, local_x, local_q, d2[..., None], dot[..., None]), dim=-1)) * message_mask[..., None]
 
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
-
-        conv_shape = list(frames.shape) + [frames.shape[-1], 7]
-        local_to_global = Rigid.from_tensor_7(frames.to_tensor_7()[..., None, :, :].expand(conv_shape))
-        global_to_local = Rigid.from_tensor_7(frames.invert().to_tensor_7()[..., None, :, :].expand(conv_shape))
 
         # [*, N, N, 7]
         delta = self.frame_mlp(m) * message_mask[..., None]
         delta = torch.where(delta.isnan(), 0.0, delta)
 
         # [*, N, 3]
-        x = (local_to_global.apply(global_to_local.apply(x[..., :, None, :]) + delta[..., 4:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+        x = (local_to_global.apply(local_x + delta[..., 4:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
 
         # [*, N, 4]
         q = q + (q[..., :, None, :] * delta[..., :4]).sum(dim=-2) / (n_nodes[:, None, None] - 1)
