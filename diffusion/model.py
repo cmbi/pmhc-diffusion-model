@@ -3,7 +3,7 @@ from math import sqrt, log
 
 import torch
 
-from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply_by_vec
+from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply
 
 
 class EGNNLayer(torch.nn.Module):
@@ -62,7 +62,10 @@ class EGNNLayer(torch.nn.Module):
         local_x = global_to_local.apply(x[..., :, None, :])
 
         # [*, N, N, 4]
-        local_q = global_to_local.get_rots().get_quats() * q[..., :, None, :] * local_to_global.get_rots().get_quats()
+        local_q = quat_multiply(
+            quat_multiply(global_to_local.get_rots().get_quats(), q[..., :, None, :]),
+            local_to_global.get_rots().get_quats()
+        )
 
         # [*, N, N, H]
         hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
