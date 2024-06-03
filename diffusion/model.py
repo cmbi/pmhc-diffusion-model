@@ -3,7 +3,7 @@ from math import sqrt, log
 
 import torch
 
-from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply
+from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply, quat_multiply_by_vec
 
 
 class EGNNLayer(torch.nn.Module):
@@ -12,7 +12,7 @@ class EGNNLayer(torch.nn.Module):
 
         self.feature_mlp = torch.nn.Linear((node_input_size + message_size), node_output_size)
         self.message_mlp = torch.nn.Linear(2 * node_input_size + edge_input_size + 9, message_size)
-        self.frame_mlp = torch.nn.Linear(message_size, 7)
+        self.frame_mlp = torch.nn.Linear(message_size, 6)
 
     def forward(
         self,
@@ -79,15 +79,15 @@ class EGNNLayer(torch.nn.Module):
 
         # [*, N, N, 7]
         delta = self.frame_mlp(m) * message_mask[..., None]
-        delta = torch.where(delta.isnan(), 0.0, delta)
 
         # [*, N, 3]
-        x = (local_to_global.apply(local_x + delta[..., 4:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+        upd_x = (local_to_global.apply(local_x + delta[..., 3:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
 
         # [*, N, 4]
-        q = q + (q[..., :, None, :] * delta[..., :4]).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+        local_upd_q = torch.nn.functional.normalize((local_q + quat_multiply_by_vec(local_q, delta[..., :3])).sum(dim=-2), dim=-1)
+        upd_q = quat_multiply(quat_multiply(q, local_upd_q), invert_quat(q))
 
-        return Rigid(Rotation(quats=q, normalize_quats=True), x), o
+        return Rigid(Rotation(quats=upd_q), upd_x), o
 
 
 class Model(torch.nn.Module):
