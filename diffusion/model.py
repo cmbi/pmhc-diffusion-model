@@ -114,10 +114,12 @@ class Model(torch.nn.Module):
         E = relposenc_depth
 
         I = 64
-        M = 16
+        M = 32
 
         self.gnn1 = EGNNLayer(H, E, I, M)
         self.gnn2 = EGNNLayer(I, E, I, M)
+        self.gnn3 = EGNNLayer(I, E, I, M)
+        self.gnn4 = EGNNLayer(I, E, 1, M)
 
         self.act = torch.nn.ReLU()
 
@@ -144,5 +146,9 @@ class Model(torch.nn.Module):
         frames, i = self.gnn1(noised_frames, h, e, node_mask)
         i = self.act(i)
         frames, i = self.gnn2(frames, i, e, node_mask)
+        i = self.act(i)
+        frames, i = self.gnn3(frames, i, e, node_mask)
+        i = self.act(i)
+        frames, o = self.gnn4(frames, i, e, node_mask)
 
         return frames
