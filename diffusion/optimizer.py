@@ -6,12 +6,21 @@ import logging
 import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply, rot_to_quat
 from openfold.utils.loss import compute_fape
+from openfold.np.residue_constants import rigid_group_atom_positions
 
 from .tools.frame import get_rmsd
 from .tools.pdb import save
 
 
 _log  = logging.getLogger(__name__)
+
+
+def get_cn_bond_lengths(frames: Rigid) -> torch.Tensor:
+
+    n_positions = frames.apply(torch.tensor(rigid_group_atom_positions["ALA"][0][2], device=frames.device))
+    c_positions = frames.apply(torch.tensor(rigid_group_atom_positions["ALA"][2][2], device=frames.device))
+
+    return torch.sqrt(torch.square(c_positions[..., :-1, :] - n_positions[..., 1:, :]).sum(dim=-1))
 
 
 def square(x: float) -> float:
@@ -26,18 +35,6 @@ def partial_rot(rot: Rotation, amount: float) -> Rotation:
     x = torch.nn.functional.normalize(q[..., 1:], dim=-1)
 
     return Rotation(quats=torch.cat((torch.cos(a / 2 * amount), torch.sin(a / 2 * amount) * x), dim=-1), normalize_quats=False)
-
-
-def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-
-    w = (q1[..., 0] * q2[..., 0] - q1[..., 1] * q2[..., 1] - q1[..., 2] * q2[..., 2] - q1[..., 3] * q2[..., 3]).unsqueeze(-1)
-    x = (q1[..., 2] * q2[..., 3] - q1[..., 3] * q2[..., 2] + q1[..., 1] * q2[..., 0] + q1[..., 0] * q2[..., 1]).unsqueeze(-1)
-    y = (q1[..., 3] * q2[..., 0] - q1[..., 0] * q2[..., 3] + q1[..., 2] * q2[..., 0] + q1[..., 0] * q2[..., 2]).unsqueeze(-1)
-    z = (q1[..., 1] * q2[..., 2] - q1[..., 2] * q2[..., 1] + q1[..., 3] * q2[..., 0] + q1[..., 0] * q2[..., 3]).unsqueeze(-1)
-
-    qx = torch.cat((w, x, y, z), dim=-1)
-
-    return qx
 
 
 def conjugate(q: torch.Tensor) -> torch.Tensor:
@@ -59,23 +56,25 @@ class DiffusionModelOptimizer:
     @staticmethod
     def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        # position square deviation
-        #positions_loss = (torch.square(frames_true.get_trans() - frames_pred.get_trans()).sum(dim=-1) * mask).sum(dim=-1) / mask.sum(dim=-1)
+        # [*]
+        peptide_lengths = mask.sum(dim=-1)
 
-        # rotation square deviation
-        #rotations_true = torch.nn.functional.normalize(frames_true.get_rots().get_quats(), dim=-1)
-        #rotations_pred = torch.nn.functional.normalize(frames_pred.get_rots().get_quats(), dim=-1)
+        # [*, N - 1]
+        cn_bond_lengths = get_cn_bond_lengths(frames_pred)
 
-        #dots = (rotations_pred * rotations_true).sum(dim=-1)
-        #rotations_loss = (torch.square(1.0 - torch.abs(dots)) * mask).sum(dim=-1) / mask.sum(dim=-1)
+        # [*, N]
+        mask_index = torch.arange(mask.shape[-1] - 1, device=mask.device).unsqueeze(-2).expand(mask.shape[-2], -1)
+        peptide_bond_mask = torch.where(mask_index < peptide_lengths.unsqueeze(-1), True, False)
 
-        #return positions_loss + rotations_loss
-
-        return compute_fape(
+        # [*]
+        cn_bond_length_loss = (torch.square(cn_bond_lengths - 1.33) * peptide_bond_mask).sum(dim=-1) / peptide_lengths
+        fape = compute_fape(
             frames_pred, frames_true, mask,
             frames_pred.get_trans(), frames_true.get_trans(), mask,
             1.0
         )
+
+        return cn_bond_length_loss + fape
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
