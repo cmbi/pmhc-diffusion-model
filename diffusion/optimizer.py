@@ -64,10 +64,10 @@ class DiffusionModelOptimizer:
 
         # [*, N]
         mask_index = torch.arange(mask.shape[-1] - 1, device=mask.device).unsqueeze(-2).expand(mask.shape[-2], -1)
-        peptide_bond_mask = torch.where(mask_index < peptide_lengths.unsqueeze(-1), True, False)
+        peptide_bond_mask = torch.where((mask_index + 1) < peptide_lengths.unsqueeze(-1), True, False)
 
         # [*]
-        cn_bond_length_loss = (torch.square(cn_bond_lengths - 1.33) * peptide_bond_mask).sum(dim=-1) / peptide_lengths
+        cn_bond_length_loss = (torch.square(cn_bond_lengths - 1.33) * peptide_bond_mask).sum(dim=-1) / (peptide_lengths - 1)
         fape = compute_fape(
             frames_pred, frames_true, mask,
             frames_pred.get_trans(), frames_true.get_trans(), mask,
