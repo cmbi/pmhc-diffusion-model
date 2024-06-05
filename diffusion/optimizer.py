@@ -54,27 +54,19 @@ class DiffusionModelOptimizer:
         self.beta_max = 0.8
 
     @staticmethod
-    def get_loss(frames_true: Rigid, frames_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
+    def get_loss(noise_true: Rigid, noise_pred: Rigid, mask: torch.Tensor) -> torch.Tensor:
 
-        # [*]
-        peptide_lengths = mask.sum(dim=-1)
+        # position square deviation
+        positions_loss = (torch.square(noise_true.get_trans() - noise_pred.get_trans()).sum(dim=-1) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
-        # [*, N - 1]
-        cn_bond_lengths = get_cn_bond_lengths(frames_pred)
+        # rotation square deviation
+        rotations_true = torch.nn.functional.normalize(noise_true.get_rots().get_quats(), dim=-1)
+        rotations_pred = torch.nn.functional.normalize(noise_pred.get_rots().get_quats(), dim=-1)
 
-        # [*, N]
-        mask_index = torch.arange(mask.shape[-1] - 1, device=mask.device).unsqueeze(-2).expand(mask.shape[-2], -1)
-        peptide_bond_mask = torch.where((mask_index + 1) < peptide_lengths.unsqueeze(-1), True, False)
+        dots = (rotations_pred * rotations_true).sum(dim=-1)
+        rotations_loss = (torch.square(1.0 - torch.abs(dots)) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
-        # [*]
-        cn_bond_length_loss = (torch.square(cn_bond_lengths - 1.33) * peptide_bond_mask).sum(dim=-1) / (peptide_lengths - 1)
-        fape = compute_fape(
-            frames_pred, frames_true, mask,
-            frames_pred.get_trans(), frames_true.get_trans(), mask,
-            1.0
-        )
-
-        return cn_bond_length_loss + fape
+        return positions_loss + rotations_loss
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
