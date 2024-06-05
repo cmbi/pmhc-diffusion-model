@@ -29,7 +29,7 @@ def square(x: float) -> float:
 
 def partial_rot(rot: Rotation, amount: float) -> Rotation:
 
-    q = torch.nn.functional.normalize(rot.get_quats())
+    q = torch.nn.functional.normalize(rot.get_quats(), dim=-1)
     a2 = torch.acos(torch.clamp(q[..., :1], -1.0, 1.0))
     a = torch.where(a2 * 2 > pi, a2 * 2 - 2 * pi, a2 * 2)
     x = torch.nn.functional.normalize(q[..., 1:], dim=-1)
