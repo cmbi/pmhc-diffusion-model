@@ -190,6 +190,8 @@ class DiffusionModelOptimizer:
         t = self.noise_step_count
         while t > 0:
 
+            _log.debug(f"sample t={t}")
+
             s = t - 1
 
             batch["frames"] = zt
