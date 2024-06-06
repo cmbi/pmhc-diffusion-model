@@ -56,13 +56,13 @@ class MhcpDataset(Dataset):
 
             # fetch masked pocket
             pocket_frames_data = torch.zeros(MhcpDataset.pocket_maxlen, 4, 4, device=self.device)
-            pocket_frames_data[:pocket_n_res] = torch.tensor(mhc_frames_data[mhc_pocket_mask], device=self.device)
+            pocket_frames_data[:pocket_n_res] = torch.tensor(mhc_frames_data[mhc_pocket_mask], device=self.device, requires_grad=False)
             pocket_atoms_xyz = torch.zeros(MhcpDataset.pocket_maxlen, 14, 3, device=self.device)
-            pocket_atoms_xyz[:pocket_n_res] = torch.tensor(mhc_atoms_data[mhc_pocket_mask], device=self.device)
+            pocket_atoms_xyz[:pocket_n_res] = torch.tensor(mhc_atoms_data[mhc_pocket_mask], device=self.device, requires_grad=False)
             pocket_atoms_exist = torch.zeros(MhcpDataset.pocket_maxlen, 14, device=self.device, dtype=torch.bool)
-            pocket_atoms_exist[:pocket_n_res] = torch.tensor(mhc_atoms_exist[mhc_pocket_mask], device=self.device)
+            pocket_atoms_exist[:pocket_n_res] = torch.tensor(mhc_atoms_exist[mhc_pocket_mask], device=self.device, requires_grad=False)
             pocket_aatype = torch.zeros(MhcpDataset.pocket_maxlen, device=self.device, dtype=torch.long)
-            pocket_aatype[:pocket_n_res] = torch.tensor(mhc_aatype[mhc_pocket_mask], device=self.device)
+            pocket_aatype[:pocket_n_res] = torch.tensor(mhc_aatype[mhc_pocket_mask], device=self.device, requires_grad=False)
             pocket_mask = torch.zeros(MhcpDataset.pocket_maxlen, device=self.device, dtype=torch.bool)
             pocket_mask[:pocket_n_res] = True
 
@@ -70,7 +70,7 @@ class MhcpDataset(Dataset):
 
             # masking frames with identity frames
             frames = torch.eye(4, 4, device=self.device).unsqueeze(-3).expand(MhcpDataset.peptide_maxlen, 4, 4).clone()
-            frames[:peptide_len, :, :] = torch.tensor(frames_data, device=self.device)
+            frames[:peptide_len, :, :] = torch.tensor(frames_data, device=self.device, requires_grad=False)
 
             pocket_frames = torch.eye(4, 4, device=self.device).unsqueeze(-3).expand(MhcpDataset.pocket_maxlen, 4, 4).clone()
             pocket_frames[:pocket_n_res, :, :] = pocket_frames_data[:pocket_n_res]
@@ -81,10 +81,10 @@ class MhcpDataset(Dataset):
 
             # one-hot encoded amino acid sequence
             onehot = torch.zeros([MhcpDataset.peptide_maxlen, 22], device=self.device)
-            onehot[:peptide_len, :] = torch.tensor(peptide['sequence_onehot'][:], device=self.device)
+            onehot[:peptide_len, :] = torch.tensor(peptide['sequence_onehot'][:], device=self.device, requires_grad=False)
 
             pocket_onehot = torch.zeros(MhcpDataset.pocket_maxlen, 22, device=self.device)
-            pocket_onehot[:pocket_n_res] = torch.tensor(mhc['sequence_onehot'][:], device=self.device)[mhc_pocket_mask]
+            pocket_onehot[:pocket_n_res] = torch.tensor(mhc['sequence_onehot'][:], device=self.device, requires_grad=False)[mhc_pocket_mask]
 
             # output dict
             data['mask'] = mask
