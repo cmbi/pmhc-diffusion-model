@@ -60,7 +60,9 @@ class DiffusionModelOptimizer:
 
         rotations_loss = (angle * mask).sum(dim=-1) / mask.sum(dim=-1)
 
-        return positions_loss + rotations_loss
+        _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}")
+
+        return positions_loss + 10.0 * rotations_loss
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
@@ -171,8 +173,6 @@ class DiffusionModelOptimizer:
         loss = self.get_loss(epsilon, pred_epsilon, batch["mask"]).mean()
         if loss.isnan().any():
             raise RuntimeError("NaN loss")
-
-        _log.debug(f"loss is {loss:.3f}")
 
         loss.backward()
 
