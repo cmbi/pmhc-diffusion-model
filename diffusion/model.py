@@ -2,8 +2,9 @@ from typing import Dict, Union
 from math import sqrt, log
 
 import torch
-
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply, quat_multiply_by_vec
+
+from .tools.quat import get_angle
 
 
 class EGNNLayer(torch.nn.Module):
@@ -12,7 +13,8 @@ class EGNNLayer(torch.nn.Module):
 
         self.feature_mlp = torch.nn.Linear((node_input_size + message_size), node_output_size)
         self.message_mlp = torch.nn.Linear(2 * node_input_size + edge_input_size + 9, message_size)
-        self.frame_mlp = torch.nn.Linear(message_size, 6)
+        self.translation_mlp = torch.nn.Linear(message_size, 3)
+        self.quat_mlp = torch.nn.Linear(message_size, 4)
 
     def forward(
         self,
@@ -51,43 +53,58 @@ class EGNNLayer(torch.nn.Module):
         conv_shape = list(frames.shape) + [frames.shape[-1], 7]
 
         # [*, N, N]
-        local_to_global = Rigid.from_tensor_7(frames.to_tensor_7()[..., None, :, :].expand(conv_shape))
         global_to_local = Rigid.from_tensor_7(frames.invert().to_tensor_7()[..., None, :, :].expand(conv_shape))
 
-        # [*, N, N, 1]
-        d2 = torch.square(x[:, :, None, :] - x[:, None, :, :]).sum(dim=-1)
-        dot = (q[..., :, None, :] * q[..., None, :, :]).sum(dim=-1).abs()
+        # [*, N, N]
+        d2 = torch.square(x[..., :, None, :] - x[..., None, :, :]).sum(dim=-1)
+        qdot = torch.abs((q[..., :, None, :] * q[..., None, :, :]).sum(dim=-1))
 
         # [*, N, N, 3]
         local_x = global_to_local.apply(x[..., :, None, :])
 
         # [*, N, N, 4]
-        local_q = quat_multiply(
-            quat_multiply(global_to_local.get_rots().get_quats(), q[..., :, None, :]),
-            local_to_global.get_rots().get_quats()
-        )
+        local_q = quat_multiply(global_to_local.get_rots().get_quats(), q[..., :, None, :])
 
         # [*, N, N, H]
         hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
         hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
 
         # [*, N, N, M]
-        m = self.message_mlp(torch.cat((hi, hj, e, local_x, local_q, d2[..., None], dot[..., None]), dim=-1)) * message_mask[..., None]
+        m = self.message_mlp(torch.cat((hi, hj, e, local_x, local_q, d2[..., None], qdot[..., None]), dim=-1)) * message_mask[..., None]
 
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
-        # [*, N, N, 7]
-        delta = self.frame_mlp(m) * message_mask[..., None]
-
-        # [*, N, 3]
-        upd_x = (local_to_global.apply(local_x + delta[..., 3:])).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+        # [*, N, N, 3]
+        dx = self.translation_mlp(m) * message_mask[..., None]
 
         # [*, N, 4]
-        local_upd_q = torch.nn.functional.normalize((local_q + quat_multiply_by_vec(local_q, delta[..., :3])).sum(dim=-2), dim=-1)
-        upd_q = quat_multiply(quat_multiply(q, local_upd_q), invert_quat(q))
+        dq = self.quat_mlp(m.sum(dim=-2))
+        dq = torch.where(
+            node_mask.unsqueeze(-1).expand(dq.shape),
+            dq,
+            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=dq.device).expand(dq.shape),
+        )
+        dq = torch.nn.functional.normalize(dq, dim=-1)
 
-        return Rigid(Rotation(quats=upd_q), upd_x), o
+        # [*, N, 4]
+        upd_q = quat_multiply(q, dq)
+        upd_q = torch.where(
+            node_mask.unsqueeze(-1).expand(upd_q.shape),
+            upd_q,
+            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=upd_q.device).expand(q.shape)
+        )
+
+        # [*, N]
+        upd_rot = Rotation(quats=upd_q, normalize_quats=True)
+
+        # [*, N, N]
+        rot_local_to_global = Rotation(quats=upd_q[..., :, None, :].expand(list(upd_q.shape[:-1]) + list(upd_q.shape[-2:])), normalize_quats=True)
+
+        # [*, N, 3]
+        upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+
+        return Rigid(upd_rot, upd_x), o
 
 
 class Model(torch.nn.Module):
@@ -108,7 +125,7 @@ class Model(torch.nn.Module):
         self.relative_position_encodings = torch.nn.functional.one_hot(relative_positions, num_classes=relposenc_depth)
 
         # node features: 22 + frame(=7) + time variable
-        H = sequence_onehot_depth + 7 + 1
+        H = sequence_onehot_depth + 1
 
         # edge features: position encoding + bonded
         E = relposenc_depth
@@ -118,8 +135,7 @@ class Model(torch.nn.Module):
 
         self.gnn1 = EGNNLayer(H, E, I, M)
         self.gnn2 = EGNNLayer(I, E, I, M)
-        self.gnn3 = EGNNLayer(I, E, I, M)
-        self.gnn4 = EGNNLayer(I, E, 1, M)
+        self.gnn3 = EGNNLayer(I, E, 1, M)
 
         self.act = torch.nn.ReLU()
 
@@ -140,15 +156,16 @@ class Model(torch.nn.Module):
         ft = torch.tensor([[[t / self.T]]]).expand(batch_size, self.max_len, 1)
 
         # input all coords + features to GNN
-        h = torch.cat((noised_frames.to_tensor_7(), node_features, ft), dim=-1)
+        h = torch.cat((node_features, ft), dim=-1)
         e = self.relative_position_encodings.clone().unsqueeze(0).expand(batch_size, -1, -1, -1)
 
         frames, i = self.gnn1(noised_frames, h, e, node_mask)
         i = self.act(i)
         frames, i = self.gnn2(frames, i, e, node_mask)
         i = self.act(i)
-        frames, i = self.gnn3(frames, i, e, node_mask)
-        i = self.act(i)
-        frames, o = self.gnn4(frames, i, e, node_mask)
+        frames, o = self.gnn3(frames, i, e, node_mask)
 
-        return frames
+        noise_trans = noised_frames.get_trans() - frames.get_trans()
+        noise_rot = noised_frames.get_rots().compose_q(frames.get_rots().invert(), normalize_quats=True)
+
+        return Rigid(noise_rot, noise_trans)
