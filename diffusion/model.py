@@ -11,10 +11,31 @@ class EGNNLayer(torch.nn.Module):
     def __init__(self, node_input_size: int, edge_input_size: int, node_output_size: int, message_size: int):
         super().__init__()
 
-        self.feature_mlp = torch.nn.Linear((node_input_size + message_size), node_output_size)
-        self.message_mlp = torch.nn.Linear(2 * node_input_size + edge_input_size + 9, message_size)
-        self.translation_mlp = torch.nn.Linear(message_size, 3)
-        self.quat_mlp = torch.nn.Linear(message_size, 4)
+        transition_size = 64
+
+        self.feature_mlp = torch.nn.Sequential(
+            torch.nn.Linear((node_input_size + message_size), transition_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(transition_size, node_output_size),
+        )
+
+        self.message_mlp = torch.nn.Sequential(
+            torch.nn.Linear(2 * node_input_size + edge_input_size + 9, transition_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(transition_size, message_size),
+        )
+
+        self.translation_mlp = torch.nn.Sequential(
+            torch.nn.Linear(message_size, transition_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(transition_size, 3),
+        )
+
+        self.quat_mlp = torch.nn.Sequential(
+            torch.nn.Linear(message_size, transition_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(transition_size, 4),
+        )
 
     def forward(
         self,
@@ -99,7 +120,7 @@ class EGNNLayer(torch.nn.Module):
         upd_rot = Rotation(quats=upd_q, normalize_quats=True)
 
         # [*, N, N]
-        rot_local_to_global = Rotation(quats=upd_q[..., :, None, :].expand(list(upd_q.shape[:-1]) + list(upd_q.shape[-2:])), normalize_quats=True)
+        rot_local_to_global = Rotation(quats=upd_q[..., None, :, :].expand(list(upd_q.shape[:-1]) + list(upd_q.shape[-2:])), normalize_quats=True)
 
         # [*, N, 3]
         upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / (n_nodes[:, None, None] - 1)
@@ -134,8 +155,7 @@ class Model(torch.nn.Module):
         M = 32
 
         self.gnn1 = EGNNLayer(H, E, I, M)
-        self.gnn2 = EGNNLayer(I, E, I, M)
-        self.gnn3 = EGNNLayer(I, E, 1, M)
+        self.gnn2 = EGNNLayer(I, E, 1, M)
 
         self.act = torch.nn.ReLU()
 
@@ -161,9 +181,7 @@ class Model(torch.nn.Module):
 
         frames, i = self.gnn1(noised_frames, h, e, node_mask)
         i = self.act(i)
-        frames, i = self.gnn2(frames, i, e, node_mask)
-        i = self.act(i)
-        frames, o = self.gnn3(frames, i, e, node_mask)
+        frames, o = self.gnn2(frames, i, e, node_mask)
 
         noise_trans = noised_frames.get_trans() - frames.get_trans()
         noise_rot = noised_frames.get_rots().compose_q(frames.get_rots().invert(), normalize_quats=True)
