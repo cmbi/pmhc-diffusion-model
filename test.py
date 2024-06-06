@@ -20,12 +20,17 @@ arg_parser = ArgumentParser()
 arg_parser.add_argument("model")
 arg_parser.add_argument("test_hdf5")
 arg_parser.add_argument("id")
+arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False)
 
 if __name__ == "__main__":
 
     args = arg_parser.parse_args()
 
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+    log_level = logging.INFO
+    if args.debug:
+        log_level = logging.DEBUG
+
+    logging.basicConfig(stream=sys.stdout, level=log_level)
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
@@ -48,23 +53,17 @@ if __name__ == "__main__":
     test_entry = test_dataset.get_entry(args.id)
 
     # for sampling, make a batch of size 1
-    test_entry = {key: test_entry[key].unsqueeze(0) for key in test_entry}
+    batch = {k: test_entry[k].unsqueeze(0) for k in test_entry}
 
-    true_frames = Rigid.from_tensor_7(test_entry["frames"])
-    frame_dimensions = list(range(len(true_frames.shape)))
-
+    true_frames = Rigid.from_tensor_7(batch["frames"])
     input_frames = dm.gen_noise(true_frames.shape, device=device)
 
-    batch = {
-        "frames": input_frames,
-        "mask": test_entry["mask"],
-        "features": test_entry["features"],
-    }
+    batch["frames"] = input_frames
 
-    save(true_frames[0], test_entry["mask"][0], f"{args.id}-true.pdb")
-    save(input_frames[0], test_entry["mask"][0], f"{args.id}-input.pdb")
+    save(true_frames[0], test_entry["mask"], test_entry["pocket_aatype"], test_entry["pocket_atom14_positions"], test_entry["pocket_atom14_exists"], f"{args.id}-true.pdb")
+    save(input_frames[0], test_entry["mask"], test_entry["pocket_aatype"], test_entry["pocket_atom14_positions"], test_entry["pocket_atom14_exists"], f"{args.id}-input.pdb")
 
     with torch.no_grad():
         pred_frames = dm.sample(batch)
 
-    save(pred_frames[0], test_entry["mask"][0], f"{args.id}-output.pdb")
+    save(pred_frames[0], test_entry["mask"], test_entry["pocket_aatype"], test_entry["pocket_atom14_positions"], test_entry["pocket_atom14_exists"], f"{args.id}-output.pdb")

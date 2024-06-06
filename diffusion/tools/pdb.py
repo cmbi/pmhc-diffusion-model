@@ -10,21 +10,29 @@ from Bio.PDB.PDBIO import PDBIO
 import torch
 
 from openfold.utils.rigid_utils import Rigid, Rotation
-from openfold.np.residue_constants import rigid_group_atom_positions
+from openfold.np.residue_constants import rigid_group_atom_positions, restype_name_to_atom14_names, restypes, restype_1to3
 
 
 _log = logging.getLogger(__name__)
 
 
-def save(frames: Rigid, mask: torch.Tensor, path: str):
+def save(
+    frames: Rigid,
+    mask: torch.Tensor,
+    pocket_aatype: torch.Tensor,
+    pocket_atom14_positions: torch.Tensor,
+    pocket_atom14_exists: torch.Tensor,
+    path: str,
+):
 
     structure = Structure("")
     model = PDBModel(0)
     structure.add(model)
-    chain = Chain('A')
+    chain = Chain('P')
     model.add(chain)
     n = 0
 
+    # build peptide
     atom_pos = {}
     residues = {}
     for residue_index in range(frames.shape[0]):
@@ -37,7 +45,7 @@ def save(frames: Rigid, mask: torch.Tensor, path: str):
             quats = frame.get_rots().get_quats()
             frame = Rigid(Rotation(quats=quats, normalize_quats=True), trans)
 
-            res = Residue(("A", residue_index + 1, " "), "ALA", "A")
+            res = Residue((" ", residue_index + 1, " "), "ALA", chain.id)
             chain.add(res)
             residues[residue_index] = res
 
@@ -67,7 +75,24 @@ def save(frames: Rigid, mask: torch.Tensor, path: str):
                 atom = Atom("O", p, 0.0, 1.0, ' ', f" O  ", n, element="O")
                 residues[residue_index - 1].add(atom)
 
+    # build pocket
+    chain = Chain('M')
+    model.add(chain)
 
+    for res_index, aa_index in enumerate(pocket_aatype):
+        aa_name = restype_1to3[restypes[aa_index]]
+
+        res = Residue((" ", res_index + 1, " "), aa_name, chain.id)
+        chain.add(res)
+
+        atom_names = restype_name_to_atom14_names[aa_name]
+        for atom_index, atom_name in enumerate(atom_names):
+
+            if pocket_atom14_exists[res_index, atom_index]:
+
+                n += 1
+                atom = Atom(atom_name, pocket_atom14_positions[res_index, atom_index], 0.0, 1.0, ' ', f" {atom_name} ", n, element=atom_name[0])
+                res.add(atom)
 
     io = PDBIO()
     io.set_structure(structure)
