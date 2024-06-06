@@ -73,7 +73,7 @@ class MhcpDataset(Dataset):
             frames[:peptide_len, :, :] = torch.tensor(frames_data, device=self.device)
 
             pocket_frames = torch.eye(4, 4, device=self.device).unsqueeze(-3).expand(MhcpDataset.pocket_maxlen, 4, 4).clone()
-            pocket_frames[:pocket_n_res, :, :] = torch.tensor(pocket_frames_data, device=self.device)[:pocket_n_res]
+            pocket_frames[:pocket_n_res, :, :] = pocket_frames_data[:pocket_n_res]
 
             # backbone reswise mask
             mask = torch.zeros(MhcpDataset.peptide_maxlen, device=self.device, dtype=torch.bool)
