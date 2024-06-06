@@ -43,6 +43,10 @@ class EGNNLayer(torch.nn.Module):
         h: torch.Tensor,
         e: torch.Tensor,
         node_mask: torch.Tensor,
+        pocket_h: torch.Tensor,
+        pocket_e: torch.Tensor,
+        pocket_frames: Rigid,
+        pocket_mask: torch.Tensor,
     ) -> Rigid:
         """
         Args:
@@ -50,6 +54,10 @@ class EGNNLayer(torch.nn.Module):
             h:          [*, N, H] (node features)
             e:          [*, N, N, E] (edge features)
             node_mask:  [*, N]
+            pocket_h:    [*, P, H] (node features)
+            pocket_e:    [*, N, P, E] (node features)
+            pocket_frames:      [*, P]
+            pocket_mask:        [*, P]
         Returns:
             updated frames:        [*, N]
             updated node features: [*, N, O]
@@ -57,46 +65,80 @@ class EGNNLayer(torch.nn.Module):
 
         N = h.shape[-2]
         H = h.shape[-1]
+        P = pocket_h.shape[-2]
 
         # [*, N, N]
         message_mask = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
         message_mask = torch.logical_and(message_mask, torch.logical_not(torch.eye(node_mask.shape[-1], device=node_mask.device)[None, ...]))
 
+        # [*, N, P]
+        pocket_message_mask = torch.logical_and(node_mask.unsqueeze(-1), pocket_mask.unsqueeze(-2))
+
+        # [*, N, N+P]
+        message_mask = torch.cat((message_mask, pocket_message_mask), dim=-1)
+
         # [*]
-        n_nodes = node_mask.sum(dim=-1)
+        n_peptide_nodes = node_mask.sum(dim=-1)
+        n_pocket_nodes = pocket_mask.sum(dim=-1)
+        n_neighbours = n_peptide_nodes + n_pocket_nodes - 1
 
         # [*, N, 3]
         x = frames.get_trans()
 
+        # [*, P, 3]
+        pocket_x = pocket_frames.get_trans()
+
         # [*, N, 4]
         q = frames.get_rots().get_quats()
 
-        conv_shape = list(frames.shape) + [frames.shape[-1], 7]
+        # [*, P, 4]
+        pocket_q = pocket_frames.get_rots().get_quats()
 
-        # [*, N, N]
-        global_to_local = Rigid.from_tensor_7(frames.invert().to_tensor_7()[..., None, :, :].expand(conv_shape))
+        # [*, N, N+P]
+        global_to_local = Rigid.from_tensor_7(
+            torch.cat(
+                (
+                    frames.invert().to_tensor_7()[..., None, :, :].expand(list(frames.shape) + [frames.shape[-1], 7]),
+                    pocket_frames.invert().to_tensor_7()[..., None, :, :].expand(list(frames.shape) + [pocket_frames.shape[-1], 7]),
+                ), dim=-2
+            )
+        )
 
         # [*, N, N]
         d2 = torch.square(x[..., :, None, :] - x[..., None, :, :]).sum(dim=-1)
         qdot = torch.abs((q[..., :, None, :] * q[..., None, :, :]).sum(dim=-1))
 
-        # [*, N, N, 3]
+        # [*, N, P]
+        pocket_d2 = torch.square(x[..., :, None, :] - pocket_x[..., None, :, :]).sum(dim=-1)
+        pocket_qdot = torch.abs((q[..., :, None, :] * pocket_q[..., None, :, :]).sum(dim=-1))
+
+        # [*, N, N+P]
+        d2 = torch.cat((d2, pocket_d2), dim=-1)
+        qdot = torch.cat((qdot, pocket_qdot), dim=-1)
+
+        # [*, N, N+P, 3]
         local_x = global_to_local.apply(x[..., :, None, :])
 
-        # [*, N, N, 4]
+        # [*, N, N+P, 4]
         local_q = quat_multiply(global_to_local.get_rots().get_quats(), q[..., :, None, :])
 
-        # [*, N, N, H]
-        hi = h.unsqueeze(-2).expand(-1, -1, N, -1)
-        hj = h.unsqueeze(-3).expand(-1, N, -1, -1)
+        # [*, N, N+P, H]
+        hi = h.unsqueeze(-2).expand(-1, -1, N + P, -1)
+        hj = torch.cat(
+            (h.unsqueeze(-3).expand(-1, N, -1, -1), pocket_h.unsqueeze(-3).expand(-1, N, -1, -1)),
+            dim=-2
+        )
 
-        # [*, N, N, M]
+        # [*, N, N+P, E]
+        e = torch.cat((e, pocket_e), dim=-2)
+
+        # [*, N, N+P, M]
         m = self.message_mlp(torch.cat((hi, hj, e, local_x, local_q, d2[..., None], qdot[..., None]), dim=-1)) * message_mask[..., None]
 
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
-        # [*, N, N, 3]
+        # [*, N, N+P, 3]
         dx = self.translation_mlp(m) * message_mask[..., None]
 
         # [*, N, 4]
@@ -119,11 +161,20 @@ class EGNNLayer(torch.nn.Module):
         # [*, N]
         upd_rot = Rotation(quats=upd_q, normalize_quats=True)
 
-        # [*, N, N]
-        rot_local_to_global = Rotation(quats=upd_q[..., None, :, :].expand(list(upd_q.shape[:-1]) + list(upd_q.shape[-2:])), normalize_quats=True)
+        # [*, N, N+P]
+        rot_local_to_global = Rotation(
+            quats=torch.cat(
+                (
+                    upd_q[..., None, :, :].expand(list(upd_q.shape[:-1]) + [N, 4]),
+                    pocket_q[..., None, :, :].expand(list(upd_q.shape[:-1]) + [P, 4])
+                ),
+                dim=-2
+            ),
+            normalize_quats=True
+        )
 
         # [*, N, 3]
-        upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / (n_nodes[:, None, None] - 1)
+        upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / n_neighbours[:, None, None]
 
         return Rigid(upd_rot, upd_x), o
 
@@ -135,6 +186,7 @@ class Model(torch.nn.Module):
         self.max_len = max_len
 
         relposenc_depth = max_len * 2 - 1
+        self.relposenc_depth = relposenc_depth
 
         # [N]
         relposenc_range = torch.arange(max_len)
@@ -171,6 +223,10 @@ class Model(torch.nn.Module):
         node_features = batch['features']
         node_mask = batch['mask']
 
+        pocket_frames = batch['pocket_frames']
+        pocket_mask = batch['pocket_mask']
+        pocket_features = batch['pocket_features']
+
         batch_size = node_mask.shape[0]
 
         ft = torch.tensor([[[t / self.T]]]).expand(batch_size, self.max_len, 1)
@@ -179,9 +235,17 @@ class Model(torch.nn.Module):
         h = torch.cat((node_features, ft), dim=-1)
         e = self.relative_position_encodings.clone().unsqueeze(0).expand(batch_size, -1, -1, -1)
 
-        frames, i = self.gnn1(noised_frames, h, e, node_mask)
+        # do not include time with pocket nodes
+        pocket_h = torch.cat((pocket_features, torch.zeros(list(pocket_mask.shape) + [1], device=pocket_features.device)), dim=-1)
+
+        # leave pocket edge features blank
+        pocket_e = torch.zeros(batch_size, self.max_len, pocket_mask.shape[-1], e.shape[-1], device=e.device)
+
+        frames, i = self.gnn1(noised_frames, h, e, node_mask, pocket_h, pocket_e, pocket_frames, pocket_mask)
         i = self.act(i)
-        frames, o = self.gnn2(frames, i, e, node_mask)
+        pocket_i = torch.zeros(list(pocket_h.shape[:-1]) + [i.shape[-1]], device=i.device)
+        pocket_i[..., :pocket_h.shape[-1]] = pocket_h
+        frames, o = self.gnn2(frames, i, e, node_mask, pocket_i, pocket_e, pocket_frames, pocket_mask)
 
         noise_trans = noised_frames.get_trans() - frames.get_trans()
         noise_rot = noised_frames.get_rots().compose_q(frames.get_rots().invert(), normalize_quats=True)

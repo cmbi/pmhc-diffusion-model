@@ -162,11 +162,10 @@ class DiffusionModelOptimizer:
 
         zt = self.add_noise(frames, epsilon, t)
 
-        batch = {
-            "frames": zt,
-            "mask": batch["mask"],
-            "features": batch["features"],
-        }
+        # clone dict and replace frames by noised data
+        batch = {k: batch[k] for k in batch}
+        batch["frames"] = zt
+        batch["pocket_frames"] = Rigid.from_tensor_7(batch["pocket_frames"])
 
         pred_epsilon = self.model(batch, t)
 
@@ -182,6 +181,10 @@ class DiffusionModelOptimizer:
 
         beta_delta = self.beta_max - self.beta_min
 
+        # clone dict and replace frames by noised data
+        batch = {k: batch[k] for k in batch}
+        batch["pocket_frames"] = Rigid.from_tensor_7(batch["pocket_frames"])
+
         zt = batch["frames"]
 
         t = self.noise_step_count
@@ -189,11 +192,7 @@ class DiffusionModelOptimizer:
 
             s = t - 1
 
-            batch = {
-                "frames": zt,
-                "mask": batch["mask"],
-                "features": batch["features"],
-            }
+            batch["frames"] = zt
 
             zs = self.remove_noise(
                 zt, self.model(batch, t),
