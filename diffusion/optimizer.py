@@ -10,6 +10,7 @@ from openfold.np.residue_constants import rigid_group_atom_positions
 
 from .tools.frame import get_rmsd
 from .tools.pdb import save
+from .tools.quat import get_angle
 
 
 _log  = logging.getLogger(__name__)
@@ -37,11 +38,6 @@ def partial_rot(rot: Rotation, amount: float) -> Rotation:
     return Rotation(quats=torch.cat((torch.cos(a / 2 * amount), torch.sin(a / 2 * amount) * x), dim=-1), normalize_quats=False)
 
 
-def conjugate(q: torch.Tensor) -> torch.Tensor:
-
-    return torch.cat((q[..., :1], -q[..., 1:]), dim=-1)
-
-
 class DiffusionModelOptimizer:
 
     def __init__(self, noise_step_count: int, model: torch.nn.Module):
@@ -59,12 +55,10 @@ class DiffusionModelOptimizer:
         # position square deviation
         positions_loss = (torch.square(noise_true.get_trans() - noise_pred.get_trans()).sum(dim=-1) * mask).sum(dim=-1) / mask.sum(dim=-1)
 
-        # rotation square deviation
-        rotations_true = torch.nn.functional.normalize(noise_true.get_rots().get_quats(), dim=-1)
-        rotations_pred = torch.nn.functional.normalize(noise_pred.get_rots().get_quats(), dim=-1)
+        # rotation angle deviation
+        angle = get_angle(noise_true.get_rots().get_quats(), noise_pred.get_rots().get_quats())
 
-        dots = (rotations_pred * rotations_true).sum(dim=-1)
-        rotations_loss = (torch.square(1.0 - torch.abs(dots)) * mask).sum(dim=-1) / mask.sum(dim=-1)
+        rotations_loss = (angle * mask).sum(dim=-1) / mask.sum(dim=-1)
 
         return positions_loss + rotations_loss
 
