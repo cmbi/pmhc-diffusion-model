@@ -76,7 +76,7 @@ class DiffusionModelOptimizer:
 
         _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}, torsions loss mean is {torsion_loss.mean():.3f}")
 
-        return positions_loss + 10.0 * rotations_loss
+        return positions_loss + 10.0 * rotations_loss + torsion_loss
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
@@ -148,7 +148,7 @@ class DiffusionModelOptimizer:
         beta_t, alpha_t, sigma_t = self.get_beta_alpha_sigma(t)
         beta_s, alpha_s, sigma_s = self.get_beta_alpha_sigma(s)
 
-        random_noise = DiffusionModelOptimizer.gen_noise(noised_signal.shape, noised_signal.device)
+        random_noise = DiffusionModelOptimizer.gen_noise(noised_signal["frames"].shape, noised_signal["frames"].device)
 
         alpha_ts = alpha_t / alpha_s
         sqr_sigma_ts = square(sigma_t) - square(sigma_s) * alpha_ts
@@ -186,7 +186,7 @@ class DiffusionModelOptimizer:
             dim=-1,
         )
 
-        result = {k: signal[k] for k in signal}
+        result = {k: noised_signal[k] for k in noised_signal}
         result["frames"] = Rigid(denoised_rot, denoised_pos)
         result["torsions"] = denoised_torsion
         return result
@@ -231,10 +231,8 @@ class DiffusionModelOptimizer:
 
             s = t - 1
 
-            batch["frames"] = zt
-
             zs = self.remove_noise(
-                zt, self.model(batch, t),
+                zt, self.model(zt, t),
                 t, s,
             )
 

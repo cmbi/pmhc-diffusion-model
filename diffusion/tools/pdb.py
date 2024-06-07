@@ -1,4 +1,5 @@
 import logging
+from typing import Dict, Union
 
 from Bio.PDB.Structure import Structure
 from Bio.PDB.Model import Model as PDBModel
@@ -17,11 +18,8 @@ _log = logging.getLogger(__name__)
 
 
 def save(
-    frames: Rigid,
-    mask: torch.Tensor,
-    pocket_aatype: torch.Tensor,
-    pocket_atom14_positions: torch.Tensor,
-    pocket_atom14_exists: torch.Tensor,
+    batch: Dict[str, Union[Rigid, torch.Tensor]],
+    batch_index: int,
     path: str,
 ):
 
@@ -35,10 +33,10 @@ def save(
     # build peptide
     atom_pos = {}
     residues = {}
-    for residue_index in range(frames.shape[0]):
-        if mask[residue_index]:
+    for residue_index in range(batch['frames'].shape[1]):
+        if batch['mask'][batch_index, residue_index]:
 
-            frame = frames[residue_index]
+            frame = batch['frames'][batch_index, residue_index]
 
             # normalize quaternions
             trans = frame.get_trans()
@@ -79,7 +77,7 @@ def save(
     chain = Chain('M')
     model.add(chain)
 
-    for res_index, aa_index in enumerate(pocket_aatype):
+    for res_index, aa_index in enumerate(batch['pocket_aatype'][batch_index]):
         aa_name = restype_1to3[restypes[aa_index]]
 
         res = Residue((" ", res_index + 1, " "), aa_name, chain.id)
@@ -88,10 +86,19 @@ def save(
         atom_names = restype_name_to_atom14_names[aa_name]
         for atom_index, atom_name in enumerate(atom_names):
 
-            if pocket_atom14_exists[res_index, atom_index]:
+            if batch['pocket_atom14_exists'][batch_index, res_index, atom_index]:
 
                 n += 1
-                atom = Atom(atom_name, pocket_atom14_positions[res_index, atom_index], 0.0, 1.0, ' ', f" {atom_name} ", n, element=atom_name[0])
+                atom = Atom(
+                    atom_name,
+                    batch['pocket_atom14_positions'][batch_index, res_index, atom_index],
+                    0.0,
+                    1.0,
+                    ' ',
+                    f" {atom_name} ",
+                    n,
+                    element=atom_name[0]
+                )
                 res.add(atom)
 
     io = PDBIO()

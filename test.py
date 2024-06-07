@@ -54,8 +54,8 @@ if __name__ == "__main__":
 
     # for sampling, make a batch of size 1
     true_batch = {k: test_entry[k].unsqueeze(0) for k in test_entry}
-    true_batch["frames"] = Rigid.from_tensor_7(batch["frames"])
-    true_batch["pocket_frames"] = Rigid.from_tensor_7(batch["pocket_frames"])
+    true_batch["frames"] = Rigid.from_tensor_7(true_batch["frames"])
+    true_batch["pocket_frames"] = Rigid.from_tensor_7(true_batch["pocket_frames"])
 
     noise = dm.gen_noise(true_batch["frames"].shape, device=device)
     input_batch = {k: true_batch[k] for k in true_batch}
