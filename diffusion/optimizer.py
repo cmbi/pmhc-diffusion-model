@@ -72,13 +72,15 @@ class DiffusionModelOptimizer:
 
         sigma = sqrt(1.0 - alpha * alpha)
 
+        _log.debug(f"at {noise_step}: beta={beta:.3f}")
+
         return (beta, alpha, sigma)
 
     @staticmethod
     def gen_noise(shape: Union[List[int], Tuple[int]], device: torch.device) -> Rigid:
 
         # position: [..., 3]
-        p = torch.randn(list(shape) + [3], device=device)
+        p = torch.randn(list(shape) + [3], device=device) * 5.0
 
         # rotation axis: [..., 3]
         u = torch.randn(list(shape) + [3], device=device)
