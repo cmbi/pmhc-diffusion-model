@@ -165,8 +165,8 @@ class EGNNLayer(torch.nn.Module):
         rot_local_to_global = Rotation(
             quats=torch.cat(
                 (
-                    upd_q[..., None, :, :].expand(list(upd_q.shape[:-1]) + [N, 4]),
-                    pocket_q[..., None, :, :].expand(list(upd_q.shape[:-1]) + [P, 4])
+                    q[..., None, :, :].expand(list(q.shape[:-1]) + [N, 4]),
+                    pocket_q[..., None, :, :].expand(list(q.shape[:-1]) + [P, 4])
                 ),
                 dim=-2
             ),
@@ -247,7 +247,4 @@ class Model(torch.nn.Module):
         pocket_i[..., :pocket_h.shape[-1]] = pocket_h
         frames, o = self.gnn2(frames, i, e, node_mask, pocket_i, pocket_e, pocket_frames, pocket_mask)
 
-        noise_trans = noised_frames.get_trans() - frames.get_trans()
-        noise_rot = noised_frames.get_rots().compose_q(frames.get_rots().invert(), normalize_quats=True)
-
-        return Rigid(noise_rot, noise_trans)
+        return frames
