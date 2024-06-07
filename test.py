@@ -26,17 +26,19 @@ if __name__ == "__main__":
 
     args = arg_parser.parse_args()
 
+    # init logger
     log_level = logging.INFO
     if args.debug:
         log_level = logging.DEBUG
 
     logging.basicConfig(stream=sys.stdout, level=log_level)
 
+    # select device
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda")
 
-    # init
+    # init model & optimizer
     _log.debug(f"initializing model")
     T = 1000
     model = Model(16, 22, T).to(device=device)
@@ -46,9 +48,10 @@ if __name__ == "__main__":
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
-    # sample
+    # load model state from input file
     model.load_state_dict(torch.load(args.model, map_location=device))
 
+    # get requested data from file
     test_dataset = MhcpDataset(args.test_hdf5, device)
     test_entry = test_dataset.get_entry(args.id)
 
@@ -57,11 +60,13 @@ if __name__ == "__main__":
     true_batch["frames"] = Rigid.from_tensor_7(true_batch["frames"])
     true_batch["pocket_frames"] = Rigid.from_tensor_7(true_batch["pocket_frames"])
 
+    # noisify
     noise = dm.gen_noise(true_batch["frames"].shape, device=device)
     input_batch = {k: true_batch[k] for k in true_batch}
     input_batch["frames"] = noise["frames"]
     input_batch["torsions"] = noise["torsions"]
 
+    # save truth and noisified data
     save(true_batch, 0, f"{args.id}-true.pdb")
     save(input_batch, 0, f"{args.id}-input.pdb")
 
@@ -73,4 +78,5 @@ if __name__ == "__main__":
 
         pred_batch = dm.sample(input_batch)
 
+    # save denoisified data
     save(pred_batch, 0, f"{args.id}-output.pdb")

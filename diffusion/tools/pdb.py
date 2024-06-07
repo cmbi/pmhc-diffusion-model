@@ -37,6 +37,7 @@ def save(
     path: str,
 ):
 
+    # build biopython structure
     structure = Structure("")
     model = PDBModel(0)
     structure.add(model)
@@ -44,6 +45,7 @@ def save(
     model.add(chain)
     n = 0
 
+    # convert openfold data to tensors
     default_frames = torch.tensor(
         restype_rigid_group_default_frame,
         device=batch['frames'].device,
@@ -81,7 +83,7 @@ def save(
         literature_positions,
     )
 
-    # build peptide
+    # build peptide from frames & torsion angles
     atom_pos = {}
     residues = {}
     for residue_index, aa_index in enumerate(batch['aatype'][batch_index]):
@@ -128,6 +130,7 @@ def save(
             if residue_index > 0:
                 # can add backbone oxygen
 
+                # calculate position from CA, C, N atoms
                 cac = torch.nn.functional.normalize(atom_pos[(residue_index - 1, "C")] - atom_pos[(residue_index - 1, "CA")], dim=-1)
                 nc = torch.nn.functional.normalize(atom_pos[(residue_index - 1, "C")] - atom_pos[(residue_index, "N")], dim=-1)
 
@@ -142,33 +145,37 @@ def save(
             if not batch['mask'][batch_index, residue_index + 1] or (residue_index + 1) >= batch['aatype'].shape[1]:
                 # can add terminal oxygens
 
-                cac = torch.nn.functional.normalize(atom_pos[(residue_index, "C")] - atom_pos[(residue_index, "CA")], dim=-1)
+                c = atom_pos[(residue_index, "C")]
+                cac = torch.nn.functional.normalize(c - atom_pos[(residue_index, "CA")], dim=-1)
 
                 o_frame = torsion_frames[batch_index, residue_index, o_group_id]
 
+                # there's only one O atom in this group
                 for atom_name, group_id, p in rigid_group_atom_positions[aa_name]:
+
                     if group_id == o_group_id and atom_name == "O":
 
+                        # transform using psi-angle frame
                         o = o_frame.apply(torch.tensor(p))
 
+                        # add O atom
                         n += 1
                         atom = Atom("O", o, 0.0, 1.0, ' ', f" O  ", n, element="O")
                         res.add(atom)
 
-                        c = atom_pos[(residue_index, "C")]
-
+                        # mirror C-O bond in CA-C bond, to find terminal oxygen
                         co = o - c
-
                         co_proj_on_cac = cac * (co * cac).sum(dim=-1)
                         normal = co - co_proj_on_cac
 
                         oxt = c + co_proj_on_cac - normal
 
+                        # add the terminal oxygen
                         n += 1
                         atom = Atom("OXT", oxt, 0.0, 1.0, ' ', f" OXT", n, element="O")
                         res.add(atom)
 
-    # build pocket
+    # build pocket from atom positional data
     chain = Chain('M')
     model.add(chain)
 
@@ -196,6 +203,7 @@ def save(
                 )
                 res.add(atom)
 
+    # save biopython structure
     io = PDBIO()
     io.set_structure(structure)
     io.save(path)

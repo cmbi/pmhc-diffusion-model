@@ -31,6 +31,7 @@ if __name__ == "__main__":
 
     args = arg_parser.parse_args()
 
+    # init logger
     log_level = logging.INFO
     if args.debug:
         torch.autograd.detect_anomaly(check_nan=True)
@@ -38,11 +39,12 @@ if __name__ == "__main__":
 
     logging.basicConfig(stream=sys.stdout, level=log_level)
 
+    # select device
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda")
 
-    # init
+    # init model & optimizer
     _log.debug(f"initializing model")
     T = 1000
     model = Model(16, 22, T).to(device=device)
@@ -52,6 +54,7 @@ if __name__ == "__main__":
     _log.debug(f"initializing diffusion model optimizer")
     dm = DiffusionModelOptimizer(T, model)
 
+    # load dataset
     train_dataset = MhcpDataset(args.train_hdf5, device)
     train_data_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 

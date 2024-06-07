@@ -16,19 +16,15 @@ from .tools.quat import get_angle
 _log  = logging.getLogger(__name__)
 
 
-def get_cn_bond_lengths(frames: Rigid) -> torch.Tensor:
-
-    n_positions = frames.apply(torch.tensor(rigid_group_atom_positions["ALA"][0][2], device=frames.device))
-    c_positions = frames.apply(torch.tensor(rigid_group_atom_positions["ALA"][2][2], device=frames.device))
-
-    return torch.sqrt(torch.square(c_positions[..., :-1, :] - n_positions[..., 1:, :]).sum(dim=-1))
-
 
 def square(x: float) -> float:
     return x * x
 
 
 def partial_rot(rot: Rotation, amount: float) -> Rotation:
+    """
+    Leaves the axis the same but multiplies the angle by the given amount.
+    """
 
     q = torch.nn.functional.normalize(rot.get_quats(), dim=-1)
     a2 = torch.acos(torch.clamp(q[..., :1], -1.0, 1.0))
@@ -71,7 +67,7 @@ class DiffusionModelOptimizer:
 
         rotations_loss = (angle * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
 
-        # torsion deviation (sin, cos)
+        # torsion square deviation (sin, cos)
         torsion_loss = (torch.square(noise_torsions_true - noise_torsions_pred).sum(dim=-1) * torsions_mask).sum(dim=(-2, -1)) / torsions_mask.sum(dim=(-2, -1))
 
         _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}, torsions loss mean is {torsion_loss.mean():.3f}")
@@ -156,7 +152,7 @@ class DiffusionModelOptimizer:
         sigma_ts = sqrt(sqr_sigma_ts)
         sigma_t2s = sigma_ts * sigma_s / sigma_t
 
-        # denoisify position
+        # denoisify position by KL
         noised_signal_pos = noised_signal["frames"].get_trans()
         predicted_noise_pos = predicted_noise["frames"].get_trans()
         random_noise_pos = random_noise["frames"].get_trans()
@@ -165,7 +161,7 @@ class DiffusionModelOptimizer:
                        (predicted_noise_pos * sqr_sigma_ts) / (alpha_ts * sigma_t) + \
                        sigma_t2s * random_noise_pos
 
-        # denoisify rotation
+        # denoisify rotation by inverting the rotation
         noised_signal_rot = noised_signal["frames"].get_rots()
         predicted_noise_rot = predicted_noise["frames"].get_rots()
         random_noise_rot = random_noise["frames"].get_rots()
@@ -174,7 +170,7 @@ class DiffusionModelOptimizer:
             partial_rot(predicted_noise_rot, beta_t).invert().compose_r(noised_signal_rot)
         )
 
-        # denoisify torsion
+        # denoisify torsion by KL
         noised_torsion = noised_signal["torsions"]
         predicted_noise_torsion = predicted_noise["torsions"]
         random_noise_torsion = random_noise["torsions"]
@@ -200,12 +196,16 @@ class DiffusionModelOptimizer:
         batch["frames"] = Rigid.from_tensor_7(batch["frames"])
         batch["pocket_frames"] = Rigid.from_tensor_7(batch["pocket_frames"])
 
+        # noise
         epsilon = self.gen_noise(batch["frames"].shape, batch["frames"].device)
 
+        # noised data
         zt = self.add_noise(batch, epsilon, t)
 
+        # predict noise
         pred_epsilon = self.model(zt, t)
 
+        # loss computation & backward propagation
         loss = self.get_loss(epsilon, pred_epsilon, batch["mask"], batch["torsions_mask"]).mean()
         if loss.isnan().any():
             raise RuntimeError("NaN loss")
@@ -218,7 +218,7 @@ class DiffusionModelOptimizer:
 
         beta_delta = self.beta_max - self.beta_min
 
-        # clone dict and replace frames by noised data
+        # noised data to frames
         batch["pocket_frames"] = Rigid.from_tensor_7(batch["pocket_frames"])
         batch["frames"] = Rigid.from_tensor_7(batch["frames"])
 
