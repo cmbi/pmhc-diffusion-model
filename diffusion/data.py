@@ -86,10 +86,22 @@ class MhcpDataset(Dataset):
             pocket_onehot = torch.zeros(MhcpDataset.pocket_maxlen, 22, device=self.device)
             pocket_onehot[:pocket_n_res] = torch.tensor(mhc['sequence_onehot'][:], device=self.device)[mhc_pocket_mask]
 
+            # torsion angles: pre-omega, phi, psi, chi-1, chi-2, chi-3, chi-4
+            torsions = torch.zeros(MhcpDataset.peptide_maxlen, 7, 2, device=self.device)
+            torsions[:peptide_len] = torch.tensor(peptide['torsion_angles_sin_cos'][:], device=self.device)
+            torsions_mask = torch.zeros(MhcpDataset.peptide_maxlen, 7, device=self.device, dtype=torch.bool)
+            torsions_mask[:peptide_len] = torch.tensor(peptide['torsion_angles_mask'][:], device=self.device)
+            # The frames determine the backbone structure,
+            # so disable backbone torsions, except for the C-terminus.
+            torsions_mask[:, :4] = False
+            torsions_mask[peptide_len - 1, 2] = True
+
             # output dict
             data['mask'] = mask
             data['frames'] = Rigid.from_tensor_4x4(frames).to_tensor_7()  # convert to tensor, for collation
             data['features'] = onehot
+            data['torsions'] = torsions
+            data['torsions_mask'] = torsions_mask
             data['pocket_aatype'] = pocket_aatype
             data['pocket_features'] = pocket_onehot
             data['pocket_mask'] = pocket_mask

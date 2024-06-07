@@ -53,17 +53,24 @@ if __name__ == "__main__":
     test_entry = test_dataset.get_entry(args.id)
 
     # for sampling, make a batch of size 1
-    batch = {k: test_entry[k].unsqueeze(0) for k in test_entry}
+    true_batch = {k: test_entry[k].unsqueeze(0) for k in test_entry}
+    true_batch["frames"] = Rigid.from_tensor_7(batch["frames"])
+    true_batch["pocket_frames"] = Rigid.from_tensor_7(batch["pocket_frames"])
 
-    true_frames = Rigid.from_tensor_7(batch["frames"])
-    input_frames = dm.gen_noise(true_frames.shape, device=device)
+    noise = dm.gen_noise(true_batch["frames"].shape, device=device)
+    input_batch = {k: true_batch[k] for k in true_batch}
+    input_batch["frames"] = noise["frames"]
+    input_batch["torsions"] = noise["torsions"]
 
-    batch["frames"] = input_frames
-
-    save(true_frames[0], test_entry["mask"], test_entry["pocket_aatype"], test_entry["pocket_atom14_positions"], test_entry["pocket_atom14_exists"], f"{args.id}-true.pdb")
-    save(input_frames[0], test_entry["mask"], test_entry["pocket_aatype"], test_entry["pocket_atom14_positions"], test_entry["pocket_atom14_exists"], f"{args.id}-input.pdb")
+    save(true_batch, 0, f"{args.id}-true.pdb")
+    save(input_batch, 0, f"{args.id}-input.pdb")
 
     with torch.no_grad():
-        pred_frames = dm.sample(batch)
 
-    save(pred_frames[0], test_entry["mask"], test_entry["pocket_aatype"], test_entry["pocket_atom14_positions"], test_entry["pocket_atom14_exists"], f"{args.id}-output.pdb")
+        # convert back to tensors, for the optimizer to handle the format
+        input_batch["frames"] = input_batch["frames"].to_tensor_7()
+        input_batch["pocket_frames"] = input_batch["pocket_frames"].to_tensor_7()
+
+        pred_batch = dm.sample(input_batch)
+
+    save(pred_batch, 0, f"{args.id}-output.pdb")

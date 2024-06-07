@@ -37,9 +37,16 @@ class EGNNLayer(torch.nn.Module):
             torch.nn.Linear(transition_size, 4),
         )
 
+        self.torsion_mlp = torch.nn.Sequential(
+            torch.nn.Linear(message_size, transition_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(transition_size, 7 * 2),
+        )
+
     def forward(
         self,
         frames: Rigid,
+        torsions: torch.Tensor,
         h: torch.Tensor,
         e: torch.Tensor,
         node_mask: torch.Tensor,
@@ -51,6 +58,7 @@ class EGNNLayer(torch.nn.Module):
         """
         Args:
             frames:     [*, N]
+            torsions:   [*, N, 8, 2]
             h:          [*, N, H] (node features)
             e:          [*, N, N, E] (edge features)
             node_mask:  [*, N]
@@ -176,7 +184,13 @@ class EGNNLayer(torch.nn.Module):
         # [*, N, 3]
         upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / n_neighbours[:, None, None]
 
-        return Rigid(upd_rot, upd_x), o
+        # [*, N, 8, 2]
+        upd_torsions = torch.nn.functional.normalize(
+            self.torsion_mlp(m.sum(dim=-2)).reshape(torsions.shape),
+            dim=-1,
+        )
+
+        return Rigid(upd_rot, upd_x), upd_torsions, o
 
 
 class Model(torch.nn.Module):
@@ -220,6 +234,7 @@ class Model(torch.nn.Module):
     ) -> Rigid:
 
         noised_frames = batch['frames']
+        noised_torsions = batch["torsions"]
         node_features = batch['features']
         node_mask = batch['mask']
 
@@ -241,10 +256,13 @@ class Model(torch.nn.Module):
         # leave pocket edge features blank
         pocket_e = torch.zeros(batch_size, self.max_len, pocket_mask.shape[-1], e.shape[-1], device=e.device)
 
-        frames, i = self.gnn1(noised_frames, h, e, node_mask, pocket_h, pocket_e, pocket_frames, pocket_mask)
+        frames, torsions, i = self.gnn1(noised_frames, noised_torsions, h, e, node_mask, pocket_h, pocket_e, pocket_frames, pocket_mask)
         i = self.act(i)
         pocket_i = torch.zeros(list(pocket_h.shape[:-1]) + [i.shape[-1]], device=i.device)
         pocket_i[..., :pocket_h.shape[-1]] = pocket_h
-        frames, o = self.gnn2(frames, i, e, node_mask, pocket_i, pocket_e, pocket_frames, pocket_mask)
+        frames, torsions, o = self.gnn2(frames, torsions, i, e, node_mask, pocket_i, pocket_e, pocket_frames, pocket_mask)
 
-        return frames
+        return {
+            "frames": frames,
+            "torsions": torsions,
+        }
