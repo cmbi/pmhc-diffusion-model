@@ -25,10 +25,12 @@ class EGNNLayer(torch.nn.Module):
 
         super().__init__()
 
+        torsions_flat_size = 7 * 2
+
         # dimension for transitional state
         transition_size = 64
 
-        # updates node features
+        # updates node features from a message
         self.feature_mlp = torch.nn.Sequential(
             torch.nn.Linear((node_input_size + message_size), transition_size),
             torch.nn.ReLU(),
@@ -36,8 +38,9 @@ class EGNNLayer(torch.nn.Module):
         )
 
         # computes a message from two nodes and a connecting edge
+        # from: node features, edge features, frames, distances, torsions
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * node_input_size + edge_input_size + 9, transition_size),
+            torch.nn.Linear(2 * node_input_size + edge_input_size + 9 + torsions_flat_size, transition_size),
             torch.nn.ReLU(),
             torch.nn.Linear(transition_size, message_size),
         )
@@ -56,11 +59,11 @@ class EGNNLayer(torch.nn.Module):
             torch.nn.Linear(transition_size, 4),
         )
 
-        # computes a residue's torsion sin,cos angles from a message
+        # computes a residue's torsion sin & cos angles from a message
         self.torsion_mlp = torch.nn.Sequential(
-            torch.nn.Linear(message_size, transition_size),
+            torch.nn.Linear((message_size + torsions_flat_size), transition_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(transition_size, 7 * 2),
+            torch.nn.Linear(transition_size, torsions_flat_size),
         )
 
     def forward(
@@ -157,11 +160,18 @@ class EGNNLayer(torch.nn.Module):
 
         # features of neighbouring nodes i and j
         # [*, N, N+P, H]
-        hi = h.unsqueeze(-2).expand(-1, -1, N + P, -1)
-        hj = torch.cat(
+        h_i = h.unsqueeze(-2).expand(-1, -1, N + P, -1)
+        h_j = torch.cat(
             (h.unsqueeze(-3).expand(-1, N, -1, -1), pocket_h.unsqueeze(-3).expand(-1, N, -1, -1)),
             dim=-2
         )
+
+        # torsions representation
+        # [*, N, 7 * 2]
+        flat_torsions = torsions.reshape(list(torsions.shape[:-2]) + [torsions.shape[-2] * torsions.shape[-1]])
+
+        # [*, N, N+P, 7 * 2]
+        flat_torsions_i = flat_torsions[..., None, :].expand(list(flat_torsions.shape[:-1]) + [N + P, flat_torsions.shape[-1]])
 
         # edge feature representation
         # [*, N, N+P, E]
@@ -169,16 +179,16 @@ class EGNNLayer(torch.nn.Module):
 
         # gen message
         # [*, N, N+P, M]
-        m = self.message_mlp(torch.cat((hi, hj, e, local_x, local_q, d2[..., None], qdot[..., None]), dim=-1)) * message_mask[..., None]
+        m = self.message_mlp(torch.cat((h_i, h_j, e, local_x, local_q, d2[..., None], qdot[..., None], flat_torsions_i), dim=-1)) * message_mask[..., None]
 
         # gen output feature
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
         # gen torsion updates
-        # [*, N, 8, 2]
+        # [*, N, 7, 2]
         upd_torsions = torch.nn.functional.normalize(
-            self.torsion_mlp(m.sum(dim=-2)).reshape(torsions.shape),
+            self.torsion_mlp(torch.cat((m.sum(dim=-2), flat_torsions), dim=-1)).reshape(torsions.shape),
             dim=-1,
         )
 
