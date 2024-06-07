@@ -79,6 +79,10 @@ class MhcpDataset(Dataset):
             mask = torch.zeros(MhcpDataset.peptide_maxlen, device=self.device, dtype=torch.bool)
             mask[:peptide_len] = True
 
+            # aatype index
+            aatype = torch.zeros(MhcpDataset.peptide_maxlen, device=self.device, dtype=torch.long)
+            aatype[:peptide_len] = torch.tensor(peptide['aatype'][:], device=self.device, dtype=torch.long)
+
             # one-hot encoded amino acid sequence
             onehot = torch.zeros([MhcpDataset.peptide_maxlen, 22], device=self.device)
             onehot[:peptide_len, :] = torch.tensor(peptide['sequence_onehot'][:], device=self.device)
@@ -100,6 +104,7 @@ class MhcpDataset(Dataset):
             data['mask'] = mask
             data['frames'] = Rigid.from_tensor_4x4(frames).to_tensor_7()  # convert to tensor, for collation
             data['features'] = onehot
+            data['aatype'] = aatype
             data['torsions'] = torsions
             data['torsions_mask'] = torsions_mask
             data['pocket_aatype'] = pocket_aatype
