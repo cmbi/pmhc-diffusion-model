@@ -21,10 +21,11 @@ _log = logging.getLogger(__name__)
 
 
 arg_parser = ArgumentParser()
-arg_parser.add_argument("train_hdf5")
-arg_parser.add_argument("epoch_count", type=int)
-arg_parser.add_argument("output_model")
-arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False)
+arg_parser.add_argument("train_hdf5", help="train data")
+arg_parser.add_argument("epoch_count", type=int, help="number of epochs over the data")
+arg_parser.add_argument("output_model", help="output model parameters file")
+arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False, help="run in debug mode")
+arg_parser.add_argument("-T", type=int, help="number of noise steps")
 
 
 if __name__ == "__main__":
@@ -46,13 +47,12 @@ if __name__ == "__main__":
 
     # init model & optimizer
     _log.debug(f"initializing model")
-    T = 1000
-    model = Model(16, 22, T).to(device=device)
+    model = Model(16, 22, args.T).to(device=device)
     if os.path.isfile(args.output_model):
         model.load_state_dict(torch.load(args.output_model, map_location=device), strict=True)
 
     _log.debug(f"initializing diffusion model optimizer")
-    dm = DiffusionModelOptimizer(T, model)
+    dm = DiffusionModelOptimizer(args.T, model)
 
     # load dataset
     train_dataset = MhcpDataset(args.train_hdf5, device)
