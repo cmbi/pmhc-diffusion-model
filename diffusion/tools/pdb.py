@@ -11,10 +11,24 @@ from Bio.PDB.PDBIO import PDBIO
 import torch
 
 from openfold.utils.rigid_utils import Rigid, Rotation
-from openfold.np.residue_constants import rigid_group_atom_positions, restype_name_to_atom14_names, restypes, restype_1to3
+from openfold.np.residue_constants import (
+    rigid_group_atom_positions,
+    restype_name_to_atom14_names,
+    restypes,
+    restype_1to3,
+    restype_rigid_group_default_frame,
+    restype_atom14_to_rigid_group,
+    restype_atom14_mask,
+    restype_atom14_rigid_group_positions,
+)
+from openfold.utils.feats import torsion_angles_to_frames, frames_and_literature_positions_to_atom14_pos
 
 
 _log = logging.getLogger(__name__)
+
+
+ca_group_id = 0
+o_group_id = 3
 
 
 def save(
@@ -30,10 +44,48 @@ def save(
     model.add(chain)
     n = 0
 
+    default_frames = torch.tensor(
+        restype_rigid_group_default_frame,
+        device=batch['frames'].device,
+        requires_grad=False,
+    )
+    group_index = torch.tensor(
+        restype_atom14_to_rigid_group,
+        device=batch['frames'].device,
+        dtype=torch.long,
+        requires_grad=False,
+    )
+    literature_positions = torch.tensor(
+        restype_atom14_rigid_group_positions,
+        device=batch['frames'].device,
+        requires_grad=False,
+    )
+    residue_type_atom14_mask = torch.tensor(
+        restype_atom14_mask,
+        device=batch['frames'].device,
+        dtype=torch.bool,
+        requires_grad=False,
+    )
+    torsion_frames = torsion_angles_to_frames(
+        batch['frames'],
+        batch['torsions'],
+        batch['aatype'],
+        default_frames,
+    )
+    atom14_positions = frames_and_literature_positions_to_atom14_pos(
+        torsion_frames,
+        batch['aatype'],
+        default_frames,
+        group_index,
+        residue_type_atom14_mask,
+        literature_positions,
+    )
+
     # build peptide
     atom_pos = {}
     residues = {}
-    for residue_index in range(batch['frames'].shape[1]):
+    for residue_index, aa_index in enumerate(batch['aatype'][batch_index]):
+
         if batch['mask'][batch_index, residue_index]:
 
             frame = batch['frames'][batch_index, residue_index]
@@ -43,13 +95,15 @@ def save(
             quats = frame.get_rots().get_quats()
             frame = Rigid(Rotation(quats=quats, normalize_quats=True), trans)
 
-            res = Residue((" ", residue_index + 1, " "), "ALA", chain.id)
+            aa_name = restype_1to3[restypes[aa_index]]
+
+            res = Residue((" ", residue_index + 1, " "), aa_name, chain.id)
             chain.add(res)
             residues[residue_index] = res
 
-            for atom_name, group_id, p in rigid_group_atom_positions["ALA"]:
+            for atom_name, group_id, p in rigid_group_atom_positions[aa_name]:
 
-                if group_id == 0:
+                if group_id == ca_group_id:
 
                     p = frame.apply(torch.tensor(p))
 
@@ -59,8 +113,20 @@ def save(
 
                     atom_pos[(residue_index, atom_name)] = p
 
+            # side chain, except CB
+            atom_names = restype_name_to_atom14_names[aa_name]
+            for atom_index, atom_name in enumerate(atom_names):
+                if atom_index > 4 and len(atom_name.strip()) > 0:
+                    p = atom14_positions[batch_index, residue_index, atom_index]
+
+                    n += 1
+                    atom = Atom(atom_name, p, 0.0, 1.0, ' ', f" {atom_name} ", n, element=atom_name[0])
+                    res.add(atom)
+
+                    atom_pos[(residue_index, atom_name)] = p
+
             if residue_index > 0:
-                # can add oxygen
+                # can add backbone oxygen
 
                 cac = torch.nn.functional.normalize(atom_pos[(residue_index - 1, "C")] - atom_pos[(residue_index - 1, "CA")], dim=-1)
                 nc = torch.nn.functional.normalize(atom_pos[(residue_index - 1, "C")] - atom_pos[(residue_index, "N")], dim=-1)
@@ -72,6 +138,35 @@ def save(
                 n += 1
                 atom = Atom("O", p, 0.0, 1.0, ' ', f" O  ", n, element="O")
                 residues[residue_index - 1].add(atom)
+
+            if not batch['mask'][batch_index, residue_index + 1] or (residue_index + 1) >= batch['aatype'].shape[1]:
+                # can add terminal oxygens
+
+                cac = torch.nn.functional.normalize(atom_pos[(residue_index, "C")] - atom_pos[(residue_index, "CA")], dim=-1)
+
+                o_frame = torsion_frames[batch_index, residue_index, o_group_id]
+
+                for atom_name, group_id, p in rigid_group_atom_positions[aa_name]:
+                    if group_id == o_group_id and atom_name == "O":
+
+                        o = o_frame.apply(torch.tensor(p))
+
+                        n += 1
+                        atom = Atom("O", o, 0.0, 1.0, ' ', f" O  ", n, element="O")
+                        res.add(atom)
+
+                        c = atom_pos[(residue_index, "C")]
+
+                        co = o - c
+
+                        co_proj_on_cac = cac * (co * cac).sum(dim=-1)
+                        normal = co - co_proj_on_cac
+
+                        oxt = c + co_proj_on_cac - normal
+
+                        n += 1
+                        atom = Atom("OXT", oxt, 0.0, 1.0, ' ', f" OXT", n, element="O")
+                        res.add(atom)
 
     # build pocket
     chain = Chain('M')
