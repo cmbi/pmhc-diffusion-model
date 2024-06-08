@@ -25,7 +25,7 @@ arg_parser.add_argument("train_hdf5", help="train data")
 arg_parser.add_argument("epoch_count", type=int, help="number of epochs over the data")
 arg_parser.add_argument("output_model", help="output model parameters file")
 arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False, help="run in debug mode")
-arg_parser.add_argument("-T", type=int, help="number of noise steps")
+arg_parser.add_argument("-T", type=int, help="number of noise steps", default=1000)
 
 
 if __name__ == "__main__":
