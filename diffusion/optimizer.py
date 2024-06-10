@@ -136,7 +136,7 @@ class DiffusionModelOptimizer:
         random_noise = DiffusionModelOptimizer.gen_noise(noised_signal["frames"].shape, noised_signal["frames"].device)
 
         alpha_ts = alpha_t / alpha_s
-        sqr_sigma_ts = torch.square(sigma_t) - torch.square(sigma_s) * alpha_ts
+        sqr_sigma_ts = sigma_t ** 2 - sigma_s ** 2 * alpha_ts
 
         sigma_ts = sqrt(sqr_sigma_ts)
         sigma_t2s = sigma_ts * sigma_s / sigma_t
