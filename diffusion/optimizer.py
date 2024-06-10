@@ -21,17 +21,93 @@ def square(x: float) -> float:
     return x * x
 
 
+def random_sin_cos(shape: Union[List[int], Tuple[int]], device: torch.device) -> torch.Tensor:
+    """
+    Makes a random angle and outputs the sin,cos of that.
+    """
+
+    a = torch.rand(shape, device=device) * 2 * pi
+
+    sin_cos = torch.cat((torch.sin(a).unsqueeze(-1), torch.cos(a).unsqueeze(-1)), dim=-1)
+
+    return sin_cos
+
+
+def random_quat(shape: Union[List[int], Tuple[int]], device: torch.device) -> torch.Tensor:
+    """
+    Makes a random axis with a random rotation angle.
+    Output is a quaternion.
+    """
+
+    # spherical angles
+    phi = torch.rand(shape, device=device) * 2 * pi
+    theta = torch.rand(shape, device=device) * pi
+
+    x = torch.cos(phi).unsqueeze(-1)
+    y = torch.sin(phi).unsqueeze(-1)
+    z = torch.cos(theta).unsqueeze(-1)
+    xy = torch.cat((x, y), dim=-1)
+    xyz = torch.cat((xy * torch.sin(theta).unsqueeze(-1), z), dim=-1)
+
+    # quaternion angle
+    a2 = torch.rand(shape, device=device) * pi
+    w = torch.cos(a2).unsqueeze(-1)
+
+    q = torch.cat((w, xyz * torch.sin(a2).unsqueeze(-1)), dim=-1)
+
+    return q
+
+
+def multiply_sin_cos(sin_cos1: torch.Tensor, sin_cos2: torch.Tensor) -> torch.Tensor:
+    """
+    Treats the inputs as complex numbers (sin=imaginary, cos=real) and takes the outer product.
+    This means that in the output, the angles are added and the magnitudes are multiplied.
+    The result is NOT normalized.
+    """
+
+    return torch.cat(
+        (
+            sin_cos1[..., 1:] * sin_cos2[..., 1:] - sin_cos1[..., :1] * sin_cos2[..., :1],
+            sin_cos1[..., :1] * sin_cos2[..., 1:] + sin_cos1[..., 1:] * sin_cos2[..., :1],
+        ),
+        dim=-1
+    )
+
+
+def inverse_sin_cos(sin_cos: torch.Tensor) -> torch.Tensor:
+    """
+    Inverts the rotation angle and returns sin,cos
+    """
+
+    sin_cos = torch.nn.functional.normalize(sin_cos, dim=-1)
+    a = torch.acos(torch.clamp(sin_cos[..., 1:], -1.0, 1.0))
+    a = torch.where(sin_cos[..., :1] < 0.0, -a, a)
+
+    return torch.cat((torch.sin(-a), torch.cos(-a)), dim=-1)
+
+
+def partial_sin_cos(sin_cos: torch.Tensor, amount: float) -> torch.Tensor:
+    """
+    Multiplies the angle by the given amount.
+    """
+
+    sin_cos = torch.nn.functional.normalize(sin_cos, dim=-1)
+    a = torch.acos(torch.clamp(sin_cos[..., 1:], -1.0, 1.0))
+    a = torch.where(sin_cos[..., :1] < 0.0, -a, a)
+
+    return torch.cat((torch.sin(a * amount), torch.cos(a * amount)), dim=-1)
+
+
 def partial_rot(rot: Rotation, amount: float) -> Rotation:
     """
-    Leaves the axis the same but multiplies the angle by the given amount.
+    Normalizes the axis and multiplies the angle by the given amount.
     """
 
     q = torch.nn.functional.normalize(rot.get_quats(), dim=-1)
-    a2 = torch.acos(torch.clamp(q[..., :1], -1.0, 1.0))
-    a = torch.where(a2 * 2 > pi, a2 * 2 - 2 * pi, a2 * 2)
+    a2 = torch.acos(torch.clamp(q[..., :1], -1.0, 1.0))  # [0, pi]
     x = torch.nn.functional.normalize(q[..., 1:], dim=-1)
 
-    return Rotation(quats=torch.cat((torch.cos(a / 2 * amount), torch.sin(a / 2 * amount) * x), dim=-1), normalize_quats=False)
+    return Rotation(quats=torch.cat((torch.cos(a2 * amount), torch.sin(a2 * amount) * x), dim=-1), normalize_quats=False)
 
 
 class DiffusionModelOptimizer:
@@ -67,8 +143,10 @@ class DiffusionModelOptimizer:
 
         rotations_loss = (angle * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
 
-        # torsion square deviation (sin, cos)
-        torsion_loss = (torch.square(noise_torsions_true - noise_torsions_pred).sum(dim=-1) * torsions_mask).sum(dim=(-2, -1)) / torsions_mask.sum(dim=(-2, -1))
+        # torsion angle deviation (sin, cos)
+        torsion_dots = (torch.nn.functional.normalize(noise_torsions_true) * torch.nn.functional.normalize(noise_torsions_pred)).sum(dim=-1)
+        torsion_angle_deviation = torch.acos(torch.clamp(torsion_dots, -1.0, 1.0))
+        torsion_loss = (torsion_angle_deviation * torsions_mask).sum(dim=(-2, -1)) / torsions_mask.sum(dim=(-2, -1))
 
         _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}, torsions loss mean is {torsion_loss.mean():.3f}")
 
@@ -93,10 +171,10 @@ class DiffusionModelOptimizer:
         p = torch.randn(list(shape) + [3], device=device) * 5.0
 
         # unit quaternion [..., 4]
-        q = torch.nn.functional.normalize(torch.randn(list(shape) + [4], device=device), dim=-1)
+        q = random_quat(shape, device=device)
 
         # sin, cos [..., 7, 2]
-        torsions = torch.nn.functional.normalize(torch.randn(list(shape) + [7, 2], device=device), dim=-1)
+        torsions = random_sin_cos(list(shape) + [7], device)
 
         return {
             "frames": Rigid(Rotation(quats=q), p),
@@ -120,7 +198,10 @@ class DiffusionModelOptimizer:
         noise_torsion = noise["torsions"]
 
         # noise_torsions
-        torsion = torch.nn.functional.normalize(signal_torsion * alpha + noise_torsion * sigma, dim=-1)
+        torsion = torch.nn.functional.normalize(
+            multiply_sin_cos(partial_sin_cos(noise_torsion, beta), signal_torsion),
+            dim=-1,
+        )
 
         # noise positions
         pos = signal_pos * alpha + noise_pos * sigma
@@ -170,16 +251,17 @@ class DiffusionModelOptimizer:
             partial_rot(predicted_noise_rot, beta_t).invert().compose_r(noised_signal_rot)
         )
 
-        # denoisify torsion by KL
-        noised_torsion = noised_signal["torsions"]
+        # denoisify torsion by inverting the rotation
+        noised_signal_torsion = noised_signal["torsions"]
         predicted_noise_torsion = predicted_noise["torsions"]
         random_noise_torsion = random_noise["torsions"]
 
-        denoised_torsion = torch.nn.functional.normalize(
-            noised_torsion / alpha_ts -
-            (predicted_noise_torsion * sqr_sigma_ts) / (alpha_ts * sigma_t) +
-            sigma_t2s * random_noise_torsion,
-            dim=-1,
+        denoised_torsion = multiply_sin_cos(
+            partial_sin_cos(random_noise_torsion, beta_s),
+            multiply_sin_cos(
+                inverse_sin_cos(partial_sin_cos(predicted_noise_torsion, beta_t)),
+                noised_signal_torsion,
+            ),
         )
 
         result = {k: noised_signal[k] for k in noised_signal}
