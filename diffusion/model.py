@@ -4,7 +4,7 @@ from math import sqrt, log
 import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply, quat_multiply_by_vec
 
-from .tools.quat import get_angle
+from .tools.angle import multiply_sin_cos
 
 
 class EGNNLayer(torch.nn.Module):
@@ -40,7 +40,7 @@ class EGNNLayer(torch.nn.Module):
         # computes a message from two nodes and a connecting edge
         # from: node features, edge features, frames, distances, torsions
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * node_input_size + edge_input_size + 9 + torsions_flat_size, transition_size),
+            torch.nn.Linear(2 * node_input_size + edge_input_size + 9, transition_size),
             torch.nn.ReLU(),
             torch.nn.Linear(transition_size, message_size),
         )
@@ -166,31 +166,28 @@ class EGNNLayer(torch.nn.Module):
             dim=-2
         )
 
-        # torsions representation
-        # [*, N, 7 * 2]
-        flat_torsions = torsions.reshape(list(torsions.shape[:-2]) + [torsions.shape[-2] * torsions.shape[-1]])
-
-        # [*, N, N+P, 7 * 2]
-        flat_torsions_i = flat_torsions[..., None, :].expand(list(flat_torsions.shape[:-1]) + [N + P, flat_torsions.shape[-1]])
-
         # edge feature representation
         # [*, N, N+P, E]
         e = torch.cat((e, pocket_e), dim=-2)
 
         # gen message
         # [*, N, N+P, M]
-        m = self.message_mlp(torch.cat((h_i, h_j, e, local_x, local_q, d2[..., None], qdot[..., None], flat_torsions_i), dim=-1)) * message_mask[..., None]
+        m = self.message_mlp(torch.cat((h_i, h_j, e, local_x, local_q, d2[..., None], qdot[..., None]), dim=-1)) * message_mask[..., None]
 
         # gen output feature
         # [*, N, O]
         o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
 
+        # torsions representation
+        # [*, N, 7 * 2]
+        flat_torsions = torsions.reshape(list(torsions.shape[:-2]) + [torsions.shape[-2] * torsions.shape[-1]])
+
         # gen torsion updates
         # [*, N, 7, 2]
-        upd_torsions = torch.nn.functional.normalize(
-            self.torsion_mlp(torch.cat((m.sum(dim=-2), flat_torsions), dim=-1)).reshape(torsions.shape),
-            dim=-1,
-        )
+        d_torsions = self.torsion_mlp(torch.cat((m.sum(dim=-2), flat_torsions), dim=-1)).reshape(torsions.shape)
+
+        # [*, N, 7, 2]
+        upd_torsions = multiply_sin_cos(torsions, d_torsions)
 
         # gen local translation update
         # [*, N, N+P, 3]
@@ -199,21 +196,10 @@ class EGNNLayer(torch.nn.Module):
         # gen local rotation update, identity where masked
         # [*, N, 4]
         dq = self.quat_mlp(m.sum(dim=-2))
-        dq = torch.where(
-            node_mask.unsqueeze(-1).expand(dq.shape),
-            dq,
-            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=dq.device).expand(dq.shape),
-        )
-        dq = torch.nn.functional.normalize(dq, dim=-1)
 
         # global rotation update, identity where masked
         # [*, N, 4]
         upd_q = quat_multiply(q, dq)
-        upd_q = torch.where(
-            node_mask.unsqueeze(-1).expand(upd_q.shape),
-            upd_q,
-            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=upd_q.device).expand(q.shape)
-        )
 
         # transform local translation updates to global space
         # [*, N, N+P]
@@ -225,13 +211,14 @@ class EGNNLayer(torch.nn.Module):
                 ),
                 dim=-2
             ),
-            normalize_quats=True
+            normalize_quats=False,
         )
 
         # [*, N, 3]
         upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / n_neighbours[:, None, None]
 
-        # output updated frames, torsions and node features
+        # Output updated frames, torsions and node features.
+        # We must normalize the quats here, for the next layer.
         return Rigid(Rotation(quats=upd_q, normalize_quats=True), upd_x), upd_torsions, o
 
 
