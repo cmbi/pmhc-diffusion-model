@@ -33,6 +33,7 @@ def get_quat_angle(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
 def random_sin_cos(shape: Union[List[int], Tuple[int]], device: torch.device) -> torch.Tensor:
     """
     Makes a random angle and outputs the sin,cos of that.
+    Output is normalized.
     """
 
     a = torch.rand(shape, device=device) * 2 * pi
@@ -45,7 +46,7 @@ def random_sin_cos(shape: Union[List[int], Tuple[int]], device: torch.device) ->
 def random_quat(shape: Union[List[int], Tuple[int]], device: torch.device) -> torch.Tensor:
     """
     Makes a random axis with a random rotation angle.
-    Output is a quaternion.
+    Output is a normalized quaternion.
     """
 
     # spherical angles
@@ -115,7 +116,7 @@ def partial_sin_cos(sin_cos: torch.Tensor, amount: float) -> torch.Tensor:
     """
 
     sin_cos = torch.nn.functional.normalize(sin_cos, dim=-1)
-    a = torch.acos(torch.clamp(sin_cos[..., 1:], -1.0, 1.0))
+    a = torch.acos(torch.clamp(sin_cos[..., 1:], -1.0, 1.0))  # [0, pi]
     a = torch.where(sin_cos[..., :1] < 0.0, -a, a)
 
     return torch.cat((torch.sin(a * amount), torch.cos(a * amount)), dim=-1)
