@@ -26,6 +26,8 @@ arg_parser.add_argument("epoch_count", type=int, help="number of epochs over the
 arg_parser.add_argument("output_model", help="output model parameters file")
 arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False, help="run in debug mode")
 arg_parser.add_argument("-T", type=int, help="number of noise steps", default=1000)
+arg_parser.add_argument("--batch-size", "-b", type=int, help="data batch size", default=64)
+arg_parser.add_argument("--num-workers", "-w", type=int, help="number of batch loading workers", default=4)
 
 
 if __name__ == "__main__":
@@ -56,7 +58,7 @@ if __name__ == "__main__":
 
     # load dataset
     train_dataset = MhcpDataset(args.train_hdf5, device)
-    train_data_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    train_data_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     # train
     for epoch_index in range(args.epoch_count):
