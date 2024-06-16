@@ -234,6 +234,19 @@ class EGNNLayer(torch.nn.Module):
 
         return message
 
+    @staticmethod
+    def _get_message_weight(message_mask: torch.Tensor) -> torch.Tensor:
+
+        # [*, N]
+        n_message = message_mask.sum(dim=-1)
+        weight = torch.where(
+            n_message > 0,
+            1.0 / n_message,
+            0.0,
+        )
+
+        return weight
+
     def _torsion_update(
         self,
         torsions: torch.Tensor,
@@ -241,12 +254,15 @@ class EGNNLayer(torch.nn.Module):
         message_mask: torch.Tensor,
     ) -> torch.Tensor:
 
+        # [*, N]
+        c = self._get_message_weight(message_mask)
+
         # torsions representation
         # [*, N, 7 * 2]
         flat_torsions = torsions.reshape(list(torsions.shape[:-2]) + [torsions.shape[-2] * torsions.shape[-1]])
 
         # [*, N, 7, 2]
-        delta = self.torsion_mlp(torch.cat((message.sum(dim=-2), flat_torsions), dim=-1)).reshape(torsions.shape)
+        delta = self.torsion_mlp(torch.cat((message.sum(dim=-2) * c[..., None], flat_torsions), dim=-1)).reshape(torsions.shape)
 
         # [*, N, 7, 2]
         torsions = torch.where(
@@ -264,9 +280,12 @@ class EGNNLayer(torch.nn.Module):
         message_mask: torch.Tensor,
     ) -> torch.Tensor:
 
+        # [*, N]
+        c = self._get_message_weight(message_mask)
+
         # gen local rotation update, identity where masked
         # [*, N, 4]
-        delta = self.quat_mlp(message.sum(dim=-2))
+        delta = self.quat_mlp(message.sum(dim=-2) * c[..., None])
 
         # global rotation update
         # [*, N, 4]
@@ -287,7 +306,7 @@ class EGNNLayer(torch.nn.Module):
     ) -> torch.Tensor:
 
         # [*, N]
-        neighbour_count = message_mask.sum(dim=-1)
+        c = self._get_message_weight(message_mask)
 
         # gen local translation update
         # [*, N, N+P, 3]
@@ -298,7 +317,7 @@ class EGNNLayer(torch.nn.Module):
         rot_local_to_global = Rotation(quats=neighbour_quats, normalize_quats=False)
 
         # [*, N, 3]
-        x = x + rot_local_to_global.apply(delta).sum(dim=-2)
+        x = x + rot_local_to_global.apply(delta).sum(dim=-2) * c[..., None]
 
         return x
 
