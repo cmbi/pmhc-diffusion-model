@@ -294,6 +294,7 @@ class EGNNLayer(torch.nn.Module):
             quat_multiply(quats, delta),
             quats,
         )
+        quats = torch.nn.functional.normalize(quats, dim=-1)
 
         return quats
 
