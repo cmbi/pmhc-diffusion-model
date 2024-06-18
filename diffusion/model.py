@@ -263,6 +263,7 @@ class EGNNLayer(torch.nn.Module):
 
         # [*, N, 7, 2]
         delta = self.torsion_mlp(torch.cat((message.sum(dim=-2) * c[..., None], flat_torsions), dim=-1)).reshape(torsions.shape)
+        delta = torch.nn.functional.normalize(delta, dim=-1)
 
         # [*, N, 7, 2]
         torsions = torch.where(
@@ -286,6 +287,7 @@ class EGNNLayer(torch.nn.Module):
         # gen local rotation update, identity where masked
         # [*, N, 4]
         delta = self.quat_mlp(message.sum(dim=-2) * c[..., None])
+        delta = torch.nn.functional.normalize(delta, dim=-1)
 
         # global rotation update
         # [*, N, 4]
@@ -294,7 +296,6 @@ class EGNNLayer(torch.nn.Module):
             quat_multiply(quats, delta),
             quats,
         )
-        quats = torch.nn.functional.normalize(quats, dim=-1)
 
         return quats
 
