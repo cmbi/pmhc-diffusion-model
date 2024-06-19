@@ -117,8 +117,8 @@ def multiply_sin_cos(sin_cos1: torch.Tensor, sin_cos2: torch.Tensor) -> torch.Te
 
     return torch.cat(
         (
-            sin_cos1[..., 1:] * sin_cos2[..., 1:] - sin_cos1[..., :1] * sin_cos2[..., :1],
             sin_cos1[..., :1] * sin_cos2[..., 1:] + sin_cos1[..., 1:] * sin_cos2[..., :1],
+            sin_cos1[..., 1:] * sin_cos2[..., 1:] - sin_cos1[..., :1] * sin_cos2[..., :1],
         ),
         dim=-1
     )

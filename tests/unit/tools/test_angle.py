@@ -22,4 +22,5 @@ def test_sin_cos_multiplication():
     )
 
     sin_cos_of_sum = angle_to_sin_cos(sum_of_angles)
-    assert torch.all(multiplication == sin_cos_of_sum), f"{multiplication} != {sum_of_angles}"
+    assert torch.all(torch.abs(multiplication - sin_cos_of_sum) < 1e-6), \
+        f"{multiplication}\n!=\n{sin_cos_of_sum}"
