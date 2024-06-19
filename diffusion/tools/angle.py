@@ -38,10 +38,23 @@ def random_sin_cos(shape: Union[List[int], Tuple[int]], device: torch.device) ->
 
     a = torch.rand(shape, device=device) * 2 * pi
 
-    sin_cos = torch.cat((torch.sin(a).unsqueeze(-1), torch.cos(a).unsqueeze(-1)), dim=-1)
+    return angle_to_sin_cos(a)
+
+
+def angle_to_sin_cos(angle: torch.Tensor) -> torch.Tensor:
+    """
+    Returns a tensor with the angle's sin, cos values.
+    """
+
+    sin_cos = torch.cat(
+        (
+            torch.sin(angle).unsqueeze(-1),
+            torch.cos(angle).unsqueeze(-1)
+        ),
+        dim=-1
+    )
 
     return sin_cos
-
 
 def random_quat(shape: Union[List[int], Tuple[int]], device: torch.device) -> torch.Tensor:
     """
@@ -52,15 +65,28 @@ def random_quat(shape: Union[List[int], Tuple[int]], device: torch.device) -> to
     # spherical angles
     phi = torch.rand(shape, device=device) * 2 * pi
     theta = torch.rand(shape, device=device) * pi
+    alpha = torch.rand(shape, device=device) * pi * 2 - pi
 
-    x = torch.cos(phi).unsqueeze(-1)
-    y = torch.sin(phi).unsqueeze(-1)
-    z = torch.cos(theta).unsqueeze(-1)
+    return spherical_to_quat(phi, theta, alpha)
+
+
+def spherical_to_quat(
+    axis_phi: torch.Tensor,
+    axis_theta: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Turns an axis (spherical coordinates) and a rotation anglr
+    into a normalized quaternion
+    """
+
+    x = torch.cos(axis_phi).unsqueeze(-1)
+    y = torch.sin(axis_phi).unsqueeze(-1)
+    z = torch.cos(axis_theta).unsqueeze(-1)
     xy = torch.cat((x, y), dim=-1)
-    xyz = torch.cat((xy * torch.sin(theta).unsqueeze(-1), z), dim=-1)
+    xyz = torch.cat((xy * torch.sin(axis_theta).unsqueeze(-1), z), dim=-1)
 
-    # quaternion angle
-    a2 = torch.rand(shape, device=device) * pi
+    a2 = alpha / 2
     w = torch.cos(a2).unsqueeze(-1)
 
     q = torch.cat((w, xyz * torch.sin(a2).unsqueeze(-1)), dim=-1)
