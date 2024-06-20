@@ -19,9 +19,9 @@ _log  = logging.getLogger(__name__)
 def linear_schedule(t: int, T: int, beta_min: float, beta_max: float) -> float:
     return beta_min + (beta_max - beta_min) * (float(t) / T)
 
-def square_schedule(t: int, T: int, beta_min: float, beta_max: float) -> float:
+def pow_schedule(t: int, T: int, beta_min: float, beta_max: float, p: int) -> float:
     tf = float(t) / T
-    return beta_min + (beta_max - beta_min) * tf * tf
+    return beta_min + (beta_max - beta_min) * tf ** p
 
 class DiffusionModelOptimizer:
 
@@ -51,11 +51,12 @@ class DiffusionModelOptimizer:
         # position square deviation
         positions_loss = (torch.square(noise_frames_true.get_trans() - noise_frames_pred.get_trans()).sum(dim=-1) * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
 
-        # rotation angle deviation, absolute quaternion dot product represents the deviation
+        # rotation angle deviation, the absolute quaternion dot product
+        # represents the deviation
         quats_true = torch.nn.functional.normalize(noise_frames_true.get_rots().get_quats(), dim=-1)
         quats_pred = torch.nn.functional.normalize(noise_frames_pred.get_rots().get_quats(), dim=-1)
         quats_dots = (quats_true * quats_pred).sum(dim=-1)
-        quats_deviation = 2.0 - 2 * torch.abs(quats_dots)  # range 0.0 to 1.0
+        quats_deviation = 1.0 - torch.abs(quats_dots)  # range 0.0 to 1.0
         rotations_loss = (quats_deviation * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
 
         # torsion angle deviation (sin, cos)
@@ -71,7 +72,7 @@ class DiffusionModelOptimizer:
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
-        beta = square_schedule(noise_step, self.noise_step_count, self.beta_min, self.beta_max)
+        beta = pow_schedule(noise_step, self.noise_step_count, self.beta_min, self.beta_max, 3)
 
         alpha = 1.0 - beta
 
