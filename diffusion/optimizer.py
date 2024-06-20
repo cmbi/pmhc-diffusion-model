@@ -31,7 +31,7 @@ class DiffusionModelOptimizer:
         self.model = model
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-        self.beta_min = 0.0001
+        self.beta_min = 0.0
         self.beta_max = 0.8
 
     @staticmethod
@@ -72,11 +72,11 @@ class DiffusionModelOptimizer:
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
-        beta = pow_schedule(noise_step, self.noise_step_count, self.beta_min, self.beta_max, 3)
+        beta = linear_schedule(noise_step, self.noise_step_count, self.beta_min, self.beta_max)
 
-        alpha = 1.0 - beta
+        sigma = sqrt(beta)
 
-        sigma = sqrt(1.0 - alpha * alpha)
+        alpha = sqrt(1.0 - beta)
 
         _log.debug(f"at {noise_step}: beta={beta:.3f}")
 
