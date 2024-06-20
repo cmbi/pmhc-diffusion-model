@@ -62,12 +62,40 @@ def random_quat(shape: Union[List[int], Tuple[int]], device: torch.device) -> to
     Output is a normalized quaternion.
     """
 
-    # spherical angles
-    phi = torch.rand(shape, device=device) * 2 * pi
-    theta = torch.rand(shape, device=device) * pi
-    alpha = torch.rand(shape, device=device) * pi * 2 - pi
+    x = torch.rand(list(shape) + [3], device=device)
+    return shoemake_quat(x)
 
-    return spherical_to_quat(phi, theta, alpha)
+
+def shoemake_quat(x: torch.Tensor) -> torch.Tensor:
+    """
+    Converts shoemake coordinates into quaternions.
+    This is a method to get uniform rotations.
+
+    Args:
+        x: [..., 3]
+    Returns:
+        quaternions: [..., 4]
+    """
+
+    x = x.clamp(0.0, 1.0)
+
+    theta1 = (2 * pi * x[..., 1]).unsqueeze(-1)
+    theta2 = (2 * pi * x[..., 2]).unsqueeze(-1)
+
+    r1 = torch.sqrt(1.0 - x[..., 0]).unsqueeze(-1)
+    r2 = torch.sqrt(x[..., 0]).unsqueeze(-1)
+
+    q = torch.cat(
+        (
+            r1 * torch.sin(theta1),
+            r1 * torch.cos(theta1),
+            r2 * torch.sin(theta2),
+            r2 * torch.cos(theta2),
+        ),
+        dim=-1
+    )
+
+    return q
 
 
 def spherical_to_quat(
