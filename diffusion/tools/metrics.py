@@ -37,5 +37,5 @@ class MetricsRecord:
                 w.writerow(['epoch'] + keys)
 
             m = self.mean()
-            w.writerow([epoch_number] + [m[key] for key in keys])
+            w.writerow([epoch_number] + [round(m[key], 3) for key in keys])
 
