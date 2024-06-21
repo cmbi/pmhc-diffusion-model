@@ -15,6 +15,7 @@ from torch.nn.functional import one_hot
 from diffusion.optimizer import DiffusionModelOptimizer
 from diffusion.model import Model
 from diffusion.data import MhcpDataset
+from diffusion.tools.metrics import MetricsRecord
 
 
 _log = logging.getLogger(__name__)
@@ -61,11 +62,14 @@ if __name__ == "__main__":
     train_data_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     # train
+    metrics_path = args.output_model.replace('.pth', '.csv')
     for epoch_index in range(args.epoch_count):
         _log.debug(f"starting epoch {epoch_index}")
 
+        metrics = MetricsRecord()
+
         for i, batch in enumerate(train_data_loader):
-            dm.optimize(batch)
+            dm.optimize(batch, metrics)
 
             if i > 0 and i % 100 == 0:
                 torch.save(model.state_dict(), args.output_model)
@@ -73,3 +77,5 @@ if __name__ == "__main__":
 
         torch.save(model.state_dict(), args.output_model)
         _log.debug(f"saved {args.output_model}")
+
+        metrics.save(f"{metrics_path}", epoch_index)

@@ -11,6 +11,7 @@ from openfold.np.residue_constants import rigid_group_atom_positions
 from .tools.frame import get_rmsd
 from .tools.pdb import save
 from .tools.angle import random_quat, random_sin_cos, partial_rot, partial_sin_cos, inverse_sin_cos, multiply_sin_cos
+from .tools.metrics import MetricsRecord
 
 
 _log  = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class DiffusionModelOptimizer:
         noise_pred: Dict[str, Union[Rigid, torch.Tensor]],
         residues_mask: torch.Tensor,
         torsions_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
 
         noise_frames_true = noise_true['frames']
         noise_frames_pred = noise_pred['frames']
@@ -68,7 +69,12 @@ class DiffusionModelOptimizer:
 
         _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}, torsions loss mean is {torsion_loss.mean():.3f}")
 
-        return positions_loss + rotations_loss + torsion_loss
+        return {
+            'total loss': positions_loss + rotations_loss + torsion_loss,
+            'positions loss': positions_loss,
+            'rotations loss': rotations_loss,
+            'torsions loss': torsion_loss
+        }
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
@@ -184,7 +190,7 @@ class DiffusionModelOptimizer:
         result["torsions"] = denoised_torsion
         return result
 
-    def optimize(self, batch: Dict[str, Union[Rigid, torch.Tensor]]):
+    def optimize(self, batch: Dict[str, Union[Rigid, torch.Tensor]], metrics: Optional[MetricsRecord] = None):
 
         t = random.randint(0, self.noise_step_count - 1)
 
@@ -203,11 +209,15 @@ class DiffusionModelOptimizer:
         pred_epsilon = self.model(zt, t)
 
         # loss computation & backward propagation
-        loss = self.get_loss(epsilon, pred_epsilon, batch["mask"], batch["torsions_mask"]).mean()
-        if loss.isnan().any():
+        losses = self.get_loss(epsilon, pred_epsilon, batch["mask"], batch["torsions_mask"])
+
+        total_loss = losses['total loss']
+        if total_loss.isnan().any():
             raise RuntimeError("NaN loss")
 
-        loss.backward()
+        metrics.add_batch(losses)
+
+        total_loss.mean().backward()
 
         self.optimizer.step()
 
