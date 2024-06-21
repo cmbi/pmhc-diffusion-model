@@ -87,10 +87,10 @@ def shoemake_quat(x: torch.Tensor) -> torch.Tensor:
 
     q = torch.cat(
         (
+            r2 * torch.cos(theta2),
             r1 * torch.sin(theta1),
             r1 * torch.cos(theta1),
             r2 * torch.sin(theta2),
-            r2 * torch.cos(theta2),
         ),
         dim=-1
     )
