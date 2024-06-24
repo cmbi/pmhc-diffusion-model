@@ -4,7 +4,7 @@ from math import sqrt, log
 import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply, quat_multiply_by_vec
 
-from .tools.angle import multiply_sin_cos
+from .tools.angle import multiply_sin_cos, shoemake_quat
 
 
 class EGNNLayer(torch.nn.Module):
@@ -25,7 +25,8 @@ class EGNNLayer(torch.nn.Module):
 
         super().__init__()
 
-        torsions_flat_size = 7 * 2
+        n_torsions = 7
+        torsions_flat_size = n_torsions * 2
 
         # dimension for transitional state
         transition_size = 256
@@ -56,14 +57,14 @@ class EGNNLayer(torch.nn.Module):
         self.quat_mlp = torch.nn.Sequential(
             torch.nn.Linear(message_size, transition_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(transition_size, 4),
+            torch.nn.Linear(transition_size, 3),
         )
 
         # computes a residue's torsion sin & cos angles from a message
         self.torsion_mlp = torch.nn.Sequential(
             torch.nn.Linear((message_size + torsions_flat_size), transition_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(transition_size, torsions_flat_size),
+            torch.nn.Linear(transition_size, n_torsions),
         )
 
     def forward(
@@ -123,10 +124,16 @@ class EGNNLayer(torch.nn.Module):
         N = peptide_node_frames.shape[-1]
         P = pocket_node_frames.shape[-1]
 
+        # [*, N, 4]
+        upd_q = self._rotation_update(peptide_node_frames.get_rots().get_quats(), message, message_mask)
+
+        # [*, N, 7, 2]
+        upd_torsions = self._torsion_update(peptide_node_torsions, message, message_mask)
+
         # [*, N, N+P, 4]
         neighbour_quats = torch.cat(
             (
-                peptide_node_frames.get_rots().get_quats()[..., None, :, :].expand(list(peptide_node_frames.shape) + [N, 4]),
+                upd_q[..., None, :, :].expand(list(peptide_node_frames.shape) + [N, 4]),
                 pocket_node_frames.get_rots().get_quats()[..., None, :, :].expand(list(peptide_node_frames.shape) + [P, 4]),
             ),
             dim=-2,
@@ -134,12 +141,6 @@ class EGNNLayer(torch.nn.Module):
 
         # [*, N, 3]
         upd_x = self._translation_update(peptide_node_frames.get_trans(), message, message_mask, neighbour_quats)
-
-        # [*, N, 4]
-        upd_q = self._rotation_update(peptide_node_frames.get_rots().get_quats(), message, message_mask)
-
-        # [*, N, 7, 2]
-        upd_torsions = self._torsion_update(peptide_node_torsions, message, message_mask)
 
         # Output updated frames, torsions and node features.
         # We must normalize the quats here, for the next layer.
@@ -261,14 +262,16 @@ class EGNNLayer(torch.nn.Module):
         # [*, N, 7 * 2]
         flat_torsions = torsions.reshape(list(torsions.shape[:-2]) + [torsions.shape[-2] * torsions.shape[-1]])
 
+        # [*, N, 7]
+        delta_a = self.torsion_mlp(torch.cat((message.sum(dim=-2) * c[..., None], flat_torsions), dim=-1))
+
         # [*, N, 7, 2]
-        delta = self.torsion_mlp(torch.cat((message.sum(dim=-2) * c[..., None], flat_torsions), dim=-1)).reshape(torsions.shape)
-        delta = torch.nn.functional.normalize(delta, dim=-1)
+        delta_t = torch.cat((torch.sin(delta_a)[..., None], torch.cos(delta_a)[..., None]), dim=-1)
 
         # [*, N, 7, 2]
         torsions = torch.where(
             (message_mask.sum(dim=-1) > 0)[..., None, None].expand(torsions.shape),
-            multiply_sin_cos(torsions, delta),
+            multiply_sin_cos(torsions, delta_t),
             torsions,
         )
 
@@ -284,16 +287,31 @@ class EGNNLayer(torch.nn.Module):
         # [*, N]
         c = self._get_message_weight(message_mask)
 
-        # gen local rotation update, identity where masked
+        # [*, N, 3]
+        a = self.quat_mlp(message.sum(dim=-2) * c[..., None])
+
+        theta1 = a[..., 1].unsqueeze(-1)
+        theta2 = a[..., 2].unsqueeze(-1)
+
+        r1 = torch.abs(torch.cos(a[..., 0])).unsqueeze(-1)
+        r2 = torch.abs(torch.sin(a[..., 0])).unsqueeze(-1)
+
         # [*, N, 4]
-        delta = self.quat_mlp(message.sum(dim=-2) * c[..., None])
-        delta = torch.nn.functional.normalize(delta, dim=-1)
+        delta_q = torch.cat(
+            (
+                r2 * torch.cos(theta2),
+                r1 * torch.sin(theta1),
+                r1 * torch.cos(theta1),
+                r2 * torch.sin(theta2),
+            ),
+            dim=-1
+        )
 
         # global rotation update
         # [*, N, 4]
         quats = torch.where(
-            (message_mask.sum(dim=-1) > 0)[..., None].expand(delta.shape),
-            quat_multiply(quats, delta),
+            (message_mask.sum(dim=-1) > 0)[..., None].expand(quats.shape),
+            quat_multiply(quats, delta_q),
             quats,
         )
 
