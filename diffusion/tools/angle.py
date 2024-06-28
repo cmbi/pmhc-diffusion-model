@@ -157,11 +157,9 @@ def inverse_sin_cos(sin_cos: torch.Tensor) -> torch.Tensor:
     Inverts the rotation angle and returns sin,cos
     """
 
-    sin_cos = torch.nn.functional.normalize(sin_cos, dim=-1)
-    a = torch.acos(torch.clamp(sin_cos[..., 1:], -1.0, 1.0))
-    a = torch.where(sin_cos[..., :1] < 0.0, -a, a)
+    sqr_norm = (sin_cos ** 2).sum(dim=-1)
 
-    return torch.cat((torch.sin(-a), torch.cos(-a)), dim=-1)
+    return torch.cat((-sin_cos[..., :1], sin_cos[..., 1:]), dim=-1) / sqr_norm[..., None]
 
 
 def partial_sin_cos(sin_cos: torch.Tensor, amount: float) -> torch.Tensor:

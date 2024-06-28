@@ -2,7 +2,7 @@ from math import pi
 
 import torch
 
-from diffusion.tools.angle import angle_to_sin_cos, multiply_sin_cos, random_quat
+from diffusion.tools.angle import angle_to_sin_cos, multiply_sin_cos, random_quat, inverse_sin_cos
 
 
 epsilon = 1e-6
@@ -27,6 +27,16 @@ def test_sin_cos_multiplication():
     sin_cos_of_sum = angle_to_sin_cos(sum_of_angles)
     assert torch.all(torch.abs(multiplication - sin_cos_of_sum) < epsilon), \
         f"{multiplication}\n!=\n{sin_cos_of_sum}"
+
+    inverted = multiply_sin_cos(
+        inverse_sin_cos(sin_cos),
+        sin_cos,
+    )
+
+    # angle must be 0.0
+    assert torch.all(inverted[..., :1] == 0.0), inverted[..., :1]
+    assert torch.all(inverted[..., 1:] == 1.0), inverted[..., 1:]
+
 
 
 def test_random_quat():
