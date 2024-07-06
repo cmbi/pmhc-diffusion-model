@@ -46,7 +46,7 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.model, map_location=device))
 
     _log.debug(f"initializing diffusion model optimizer")
-    dm = DiffusionModelOptimizer(args.T, model)
+    dm = DiffusionModelOptimizer(args.T, model, 0.0)
 
     # load model state from input file
     model.load_state_dict(torch.load(args.model, map_location=device))
