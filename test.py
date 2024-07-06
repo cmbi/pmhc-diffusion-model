@@ -54,9 +54,10 @@ if __name__ == "__main__":
     # get requested data from file
     test_dataset = MhcpDataset(args.test_hdf5, device)
     test_entry = test_dataset.get_entry(args.id)
+    test_entry.update(test_dataset.get_protein_positions(args.id))
 
     # for sampling, make a batch of size 1
-    true_batch = {k: test_entry[k].unsqueeze(0) for k in test_entry}
+    true_batch = {k: test_entry[k].unsqueeze(0) for k in test_entry if isinstance(test_entry[k], torch.Tensor)}
     true_batch["frames"] = Rigid.from_tensor_7(true_batch["frames"])
     true_batch["pocket_frames"] = Rigid.from_tensor_7(true_batch["pocket_frames"])
 
