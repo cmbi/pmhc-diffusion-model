@@ -29,6 +29,7 @@ arg_parser.add_argument("--debug", "-d", action="store_const", const=True, defau
 arg_parser.add_argument("-T", type=int, help="number of noise steps", default=1000)
 arg_parser.add_argument("--batch-size", "-b", type=int, help="data batch size", default=64)
 arg_parser.add_argument("--num-workers", "-w", type=int, help="number of batch loading workers", default=4)
+arg_parser.add_argument("--lr", type=float, help="learning rate", default=0.001)
 
 
 if __name__ == "__main__":
@@ -55,7 +56,7 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.output_model, map_location=device), strict=True)
 
     _log.debug(f"initializing diffusion model optimizer")
-    dm = DiffusionModelOptimizer(args.T, model)
+    dm = DiffusionModelOptimizer(args.T, model, args.lr)
 
     # load dataset
     train_dataset = MhcpDataset(args.train_hdf5, device)

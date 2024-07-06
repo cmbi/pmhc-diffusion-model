@@ -26,11 +26,11 @@ def pow_schedule(t: int, T: int, beta_min: float, beta_max: float, p: int) -> fl
 
 class DiffusionModelOptimizer:
 
-    def __init__(self, noise_step_count: int, model: torch.nn.Module):
+    def __init__(self, noise_step_count: int, model: torch.nn.Module, lr: float):
 
         self.noise_step_count = noise_step_count
         self.model = model
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
         self.beta_min = 0.0
         self.beta_max = 0.8
@@ -51,13 +51,14 @@ class DiffusionModelOptimizer:
 
         # position square deviation
         positions_loss = (torch.square(noise_frames_true.get_trans() - noise_frames_pred.get_trans()).sum(dim=-1) * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
+        rmsd = torch.sqrt(positions_loss)
 
-        # rotation angle deviation, the absolute quaternion dot product
+        # rotation angle deviation, the square quaternion dot product
         # represents the deviation
         quats_true = torch.nn.functional.normalize(noise_frames_true.get_rots().get_quats(), dim=-1)
         quats_pred = torch.nn.functional.normalize(noise_frames_pred.get_rots().get_quats(), dim=-1)
         quats_dots = (quats_true * quats_pred).sum(dim=-1)
-        quats_deviation = 1.0 - torch.abs(quats_dots)  # range 0.0 to 1.0
+        quats_deviation = 1.0 - quats_dots  # range 0.0 to 2.0
         rotations_loss = (quats_deviation * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
 
         # torsion angle deviation (sin, cos)
@@ -70,10 +71,11 @@ class DiffusionModelOptimizer:
         _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}, torsions loss mean is {torsion_loss.mean():.3f}")
 
         return {
-            'total loss': positions_loss + rotations_loss + torsion_loss,
+            'total loss': 0.1 * positions_loss + rotations_loss + torsion_loss,
             'positions loss': positions_loss,
             'rotations loss': rotations_loss,
-            'torsions loss': torsion_loss
+            'torsions loss': torsion_loss,
+            'rmsd': rmsd,
         }
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
