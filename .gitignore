@@ -8,6 +8,9 @@
 # log
 *.log
 
+# metrics
+*.csv
+
 # torch
 *.pth
 

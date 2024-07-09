@@ -1,6 +1,5 @@
-from typing import Dict
+from typing import List, Dict, Optional, Union
 from math import log
-from typing import Optional
 
 import numpy
 import h5py
@@ -33,7 +32,7 @@ class MhcpDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entry_names)
 
-    def get_entry(self, entry_name: str) -> Dict[str, torch.Tensor]:
+    def get_entry(self, entry_name: str) -> Dict[str, Union[List[str], torch.Tensor]]:
 
         data = {}
         with h5py.File(self.hdf5_path, 'r') as f5:
@@ -91,16 +90,19 @@ class MhcpDataset(Dataset):
             pocket_onehot[:pocket_n_res] = torch.tensor(mhc['sequence_onehot'][:], device=self.device)[mhc_pocket_mask]
 
             # torsion angles: pre-omega, phi, psi, chi-1, chi-2, chi-3, chi-4
-            torsions = torch.zeros(MhcpDataset.peptide_maxlen, 7, 2, device=self.device)
+            torsions = torch.empty(MhcpDataset.peptide_maxlen, 7, 2, device=self.device)
             torsions[:peptide_len] = torch.tensor(peptide['torsion_angles_sin_cos'][:], device=self.device)
             torsions_mask = torch.zeros(MhcpDataset.peptide_maxlen, 7, device=self.device, dtype=torch.bool)
             torsions_mask[:peptide_len] = torch.tensor(peptide['torsion_angles_mask'][:], device=self.device)
             # The frames determine the backbone structure,
             # so disable backbone torsions, except for the C-terminus.
-            torsions_mask[:, :4] = False
+            torsions_mask[:, :3] = False
             torsions_mask[peptide_len - 1, 2] = True
+            # set identity, where masked
+            torsions[torch.logical_not(torsions_mask)] = torch.tensor([0.0, 1.0], device=self.device)
 
             # output dict
+            data['name'] = [entry_name]
             data['mask'] = mask
             data['frames'] = Rigid.from_tensor_4x4(frames).to_tensor_7()  # convert to tensor, for collation
             data['features'] = onehot
@@ -113,5 +115,19 @@ class MhcpDataset(Dataset):
             data['pocket_frames'] = Rigid.from_tensor_4x4(pocket_frames).to_tensor_7()  # convert to tensor, for collation
             data['pocket_atom14_positions'] = pocket_atoms_xyz
             data['pocket_atom14_exists'] = pocket_atoms_exist
+
+        return data
+
+    def get_protein_positions(self, entry_name: str) -> Dict[str, numpy.ndarray]:
+
+        data = {}
+        with h5py.File(self.hdf5_path, 'r') as f5:
+            entry = f5[entry_name]
+
+            mhc = entry['protein']
+
+            data["protein_aatype"] = torch.tensor(mhc['aatype'][:], device=self.device)
+            data["protein_atom14_positions"] = torch.tensor(mhc['atom14_gt_positions'][:], device=self.device)
+            data["protein_atom14_exists"] = torch.tensor(mhc['atom14_gt_exists'][:], device=self.device)
 
         return data

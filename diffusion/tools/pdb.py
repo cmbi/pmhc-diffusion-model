@@ -179,7 +179,7 @@ def save(
     chain = Chain('M')
     model.add(chain)
 
-    for res_index, aa_index in enumerate(batch['pocket_aatype'][batch_index]):
+    for res_index, aa_index in enumerate(batch['protein_aatype'][batch_index]):
         aa_name = restype_1to3[restypes[aa_index]]
 
         res = Residue((" ", res_index + 1, " "), aa_name, chain.id)
@@ -188,12 +188,12 @@ def save(
         atom_names = restype_name_to_atom14_names[aa_name]
         for atom_index, atom_name in enumerate(atom_names):
 
-            if batch['pocket_atom14_exists'][batch_index, res_index, atom_index]:
+            if batch['protein_atom14_exists'][batch_index, res_index, atom_index]:
 
                 n += 1
                 atom = Atom(
                     atom_name,
-                    batch['pocket_atom14_positions'][batch_index, res_index, atom_index],
+                    batch['protein_atom14_positions'][batch_index, res_index, atom_index],
                     0.0,
                     1.0,
                     ' ',

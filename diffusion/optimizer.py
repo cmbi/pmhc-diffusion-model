@@ -10,39 +10,29 @@ from openfold.np.residue_constants import rigid_group_atom_positions
 
 from .tools.frame import get_rmsd
 from .tools.pdb import save
-from .tools.quat import get_angle
+from .tools.angle import random_quat, random_sin_cos, partial_rot, partial_sin_cos, inverse_sin_cos, multiply_sin_cos
+from .tools.metrics import MetricsRecord
 
 
 _log  = logging.getLogger(__name__)
 
 
+def linear_schedule(t: int, T: int, beta_min: float, beta_max: float) -> float:
+    return beta_min + (beta_max - beta_min) * (float(t) / T)
 
-def square(x: float) -> float:
-    return x * x
-
-
-def partial_rot(rot: Rotation, amount: float) -> Rotation:
-    """
-    Leaves the axis the same but multiplies the angle by the given amount.
-    """
-
-    q = torch.nn.functional.normalize(rot.get_quats(), dim=-1)
-    a2 = torch.acos(torch.clamp(q[..., :1], -1.0, 1.0))
-    a = torch.where(a2 * 2 > pi, a2 * 2 - 2 * pi, a2 * 2)
-    x = torch.nn.functional.normalize(q[..., 1:], dim=-1)
-
-    return Rotation(quats=torch.cat((torch.cos(a / 2 * amount), torch.sin(a / 2 * amount) * x), dim=-1), normalize_quats=False)
-
+def pow_schedule(t: int, T: int, beta_min: float, beta_max: float, p: int) -> float:
+    tf = float(t) / T
+    return beta_min + (beta_max - beta_min) * tf ** p
 
 class DiffusionModelOptimizer:
 
-    def __init__(self, noise_step_count: int, model: torch.nn.Module):
+    def __init__(self, noise_step_count: int, model: torch.nn.Module, lr: float):
 
         self.noise_step_count = noise_step_count
         self.model = model
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
-        self.beta_min = 0.0001
+        self.beta_min = 0.0
         self.beta_max = 0.8
 
     @staticmethod
@@ -51,7 +41,7 @@ class DiffusionModelOptimizer:
         noise_pred: Dict[str, Union[Rigid, torch.Tensor]],
         residues_mask: torch.Tensor,
         torsions_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
 
         noise_frames_true = noise_true['frames']
         noise_frames_pred = noise_pred['frames']
@@ -61,26 +51,40 @@ class DiffusionModelOptimizer:
 
         # position square deviation
         positions_loss = (torch.square(noise_frames_true.get_trans() - noise_frames_pred.get_trans()).sum(dim=-1) * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
+        rmsd = torch.sqrt(positions_loss)
 
-        # rotation angle deviation
-        angle = get_angle(noise_frames_true.get_rots().get_quats(), noise_frames_pred.get_rots().get_quats())
+        # rotation angle deviation, the square quaternion dot product
+        # represents the deviation
+        quats_true = torch.nn.functional.normalize(noise_frames_true.get_rots().get_quats(), dim=-1)
+        quats_pred = torch.nn.functional.normalize(noise_frames_pred.get_rots().get_quats(), dim=-1)
+        quats_dots = (quats_true * quats_pred).sum(dim=-1)
+        quats_deviation = 1.0 - quats_dots  # range 0.0 to 2.0
+        rotations_loss = (quats_deviation * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
 
-        rotations_loss = (angle * residues_mask).sum(dim=-1) / residues_mask.sum(dim=-1)
-
-        # torsion square deviation (sin, cos)
-        torsion_loss = (torch.square(noise_torsions_true - noise_torsions_pred).sum(dim=-1) * torsions_mask).sum(dim=(-2, -1)) / torsions_mask.sum(dim=(-2, -1))
+        # torsion angle deviation (sin, cos)
+        noise_torsions_true = torch.nn.functional.normalize(noise_torsions_true, dim=-1)
+        noise_torsions_pred = torch.nn.functional.normalize(noise_torsions_pred, dim=-1)
+        torsion_dots = (noise_torsions_true * noise_torsions_pred).sum(dim=-1)
+        torsion_deviation = 1.0 - torsion_dots  # range 0.0 to 2.0
+        torsion_loss = (torsion_deviation * torsions_mask).sum(dim=(-2, -1)) / torsions_mask.sum(dim=(-2, -1))
 
         _log.debug(f"rotations loss mean is {rotations_loss.mean():.3f}, positions loss mean is {positions_loss.mean():.3f}, torsions loss mean is {torsion_loss.mean():.3f}")
 
-        return positions_loss + 10.0 * rotations_loss + torsion_loss
+        return {
+            'total loss': 0.1 * positions_loss + rotations_loss + torsion_loss,
+            'positions loss': positions_loss,
+            'rotations loss': rotations_loss,
+            'torsions loss': torsion_loss,
+            'rmsd': rmsd,
+        }
 
     def get_beta_alpha_sigma(self, noise_step: int) -> Tuple[float, float, float]:
 
-        beta = self.beta_min + (self.beta_max - self.beta_min) * (float(noise_step) / self.noise_step_count)
+        beta = linear_schedule(noise_step, self.noise_step_count, self.beta_min, self.beta_max)
 
-        alpha = 1.0 - beta
+        sigma = sqrt(beta)
 
-        sigma = sqrt(1.0 - alpha * alpha)
+        alpha = sqrt(1.0 - beta)
 
         _log.debug(f"at {noise_step}: beta={beta:.3f}")
 
@@ -93,10 +97,10 @@ class DiffusionModelOptimizer:
         p = torch.randn(list(shape) + [3], device=device) * 5.0
 
         # unit quaternion [..., 4]
-        q = torch.nn.functional.normalize(torch.randn(list(shape) + [4], device=device), dim=-1)
+        q = random_quat(shape, device=device)
 
         # sin, cos [..., 7, 2]
-        torsions = torch.nn.functional.normalize(torch.randn(list(shape) + [7, 2], device=device), dim=-1)
+        torsions = random_sin_cos(list(shape) + [7], device)
 
         return {
             "frames": Rigid(Rotation(quats=q), p),
@@ -120,7 +124,7 @@ class DiffusionModelOptimizer:
         noise_torsion = noise["torsions"]
 
         # noise_torsions
-        torsion = torch.nn.functional.normalize(signal_torsion * alpha + noise_torsion * sigma, dim=-1)
+        torsion = multiply_sin_cos(partial_sin_cos(noise_torsion, beta), signal_torsion)
 
         # noise positions
         pos = signal_pos * alpha + noise_pos * sigma
@@ -147,7 +151,7 @@ class DiffusionModelOptimizer:
         random_noise = DiffusionModelOptimizer.gen_noise(noised_signal["frames"].shape, noised_signal["frames"].device)
 
         alpha_ts = alpha_t / alpha_s
-        sqr_sigma_ts = square(sigma_t) - square(sigma_s) * alpha_ts
+        sqr_sigma_ts = sigma_t ** 2 - sigma_s ** 2 * alpha_ts
 
         sigma_ts = sqrt(sqr_sigma_ts)
         sigma_t2s = sigma_ts * sigma_s / sigma_t
@@ -170,16 +174,17 @@ class DiffusionModelOptimizer:
             partial_rot(predicted_noise_rot, beta_t).invert().compose_r(noised_signal_rot)
         )
 
-        # denoisify torsion by KL
-        noised_torsion = noised_signal["torsions"]
+        # denoisify torsion by inverting the rotation
+        noised_signal_torsion = noised_signal["torsions"]
         predicted_noise_torsion = predicted_noise["torsions"]
         random_noise_torsion = random_noise["torsions"]
 
-        denoised_torsion = torch.nn.functional.normalize(
-            noised_torsion / alpha_ts -
-            (predicted_noise_torsion * sqr_sigma_ts) / (alpha_ts * sigma_t) +
-            sigma_t2s * random_noise_torsion,
-            dim=-1,
+        denoised_torsion = multiply_sin_cos(
+            partial_sin_cos(random_noise_torsion, beta_s),
+            multiply_sin_cos(
+                inverse_sin_cos(partial_sin_cos(predicted_noise_torsion, beta_t)),
+                noised_signal_torsion,
+            ),
         )
 
         result = {k: noised_signal[k] for k in noised_signal}
@@ -187,7 +192,7 @@ class DiffusionModelOptimizer:
         result["torsions"] = denoised_torsion
         return result
 
-    def optimize(self, batch: Dict[str, Union[Rigid, torch.Tensor]]):
+    def optimize(self, batch: Dict[str, Union[Rigid, torch.Tensor]], metrics: Optional[MetricsRecord] = None):
 
         t = random.randint(0, self.noise_step_count - 1)
 
@@ -206,11 +211,15 @@ class DiffusionModelOptimizer:
         pred_epsilon = self.model(zt, t)
 
         # loss computation & backward propagation
-        loss = self.get_loss(epsilon, pred_epsilon, batch["mask"], batch["torsions_mask"]).mean()
-        if loss.isnan().any():
+        losses = self.get_loss(epsilon, pred_epsilon, batch["mask"], batch["torsions_mask"])
+
+        total_loss = losses['total loss']
+        if total_loss.isnan().any():
             raise RuntimeError("NaN loss")
 
-        loss.backward()
+        metrics.add_batch(losses)
+
+        total_loss.mean().backward()
 
         self.optimizer.step()
 

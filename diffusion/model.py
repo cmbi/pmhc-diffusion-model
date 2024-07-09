@@ -1,10 +1,14 @@
 from typing import Dict, Union
-from math import sqrt, log
+from math import sqrt, log, pi
 
 import torch
 from openfold.utils.rigid_utils import Rigid, Rotation, invert_quat, quat_multiply, quat_multiply_by_vec
 
-from .tools.quat import get_angle
+from .tools.angle import inverse_sin_cos, multiply_sin_cos, shoemake_quat
+
+
+epsilon = 1e-9
+infinity = 1e9
 
 
 class EGNNLayer(torch.nn.Module):
@@ -25,7 +29,8 @@ class EGNNLayer(torch.nn.Module):
 
         super().__init__()
 
-        torsions_flat_size = 7 * 2
+        n_torsions = 7
+        torsions_flat_size = n_torsions * 2
 
         # dimension for transitional state
         transition_size = 64
@@ -40,199 +45,292 @@ class EGNNLayer(torch.nn.Module):
         # computes a message from two nodes and a connecting edge
         # from: node features, edge features, frames, distances, torsions
         self.message_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * node_input_size + edge_input_size + 9 + torsions_flat_size, transition_size),
+            torch.nn.Linear(2 * node_input_size + edge_input_size, transition_size),
             torch.nn.ReLU(),
             torch.nn.Linear(transition_size, message_size),
+        )
+
+        # attention weighs the neighbours
+        self.attention_mlp = torch.nn.Sequential(
+            torch.nn.Linear(message_size + 2, transition_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(transition_size, 1),
+            torch.nn.Flatten(-2, -1),
         )
 
         # computes a translation update from a message
         self.translation_mlp = torch.nn.Sequential(
             torch.nn.Linear(message_size, transition_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(transition_size, 3),
+            torch.nn.Linear(transition_size, 1),
         )
 
         # computes a quaternion update from a message
-        self.quat_mlp = torch.nn.Sequential(
-            torch.nn.Linear(message_size, transition_size),
+        self.rotation_mlp = torch.nn.Sequential(
+            torch.nn.Linear(message_size + 4, transition_size),
             torch.nn.ReLU(),
             torch.nn.Linear(transition_size, 4),
+            torch.nn.Sigmoid(),
         )
 
         # computes a residue's torsion sin & cos angles from a message
         self.torsion_mlp = torch.nn.Sequential(
             torch.nn.Linear((message_size + torsions_flat_size), transition_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(transition_size, torsions_flat_size),
+            torch.nn.Linear(transition_size, n_torsions),
         )
 
     def forward(
         self,
-        frames: Rigid,
-        torsions: torch.Tensor,
-        h: torch.Tensor,
-        e: torch.Tensor,
-        node_mask: torch.Tensor,
-        pocket_h: torch.Tensor,
-        pocket_e: torch.Tensor,
-        pocket_frames: Rigid,
-        pocket_mask: torch.Tensor,
+        peptide_node_frames: Rigid,
+        peptide_node_torsions: torch.Tensor,
+        peptide_node_features: torch.Tensor,
+        peptide_edge_features: torch.Tensor,
+        peptide_node_mask: torch.Tensor,
+        pocket_node_features: torch.Tensor,
+        pocket_node_frames: Rigid,
+        pocket_node_mask: torch.Tensor,
     ) -> Rigid:
         """
         Args:
-            frames:     [*, N] (rotation + translation)
-            torsions:   [*, N, 7, 2]
-            h:          [*, N, H] (node features)
-            e:          [*, N, N, E] (edge features)
-            node_mask:  [*, N]
-            pocket_h:    [*, P, H] (node features)
-            pocket_e:    [*, N, P, E] (node features)
-            pocket_frames:      [*, P] (rotation + translation)
-            pocket_mask:        [*, P]
+            peptide_node_frames:     [*, N] (rotation + translation)
+            peptide_node_torsions:   [*, N, 7, 2]
+            peptide_node_features:   [*, N, H] (node features)
+            peptide_edge_features:   [*, N, N, E] (edge features)
+            peptide_node_mask:       [*, N]
+            pocket_node_features:    [*, P, H] (node features)
+            pocket_node_frames:      [*, P] (rotation + translation)
+            pocket_node_mask:        [*, P]
         Returns:
             updated frames:        [*, N]
             updated torsions:      [*, N, 7, 2]
             updated node features: [*, N, O]
         """
 
-        N = h.shape[-2]  # max number of peptide nodes
-        H = h.shape[-1]  # dimension of node features
-        P = pocket_h.shape[-2]  # max number of pocket nodes
-
         # build a mask for the messages between the nodes.
 
         # [*, N, N]
-        peptide_message_mask = torch.logical_and(node_mask.unsqueeze(-2), node_mask.unsqueeze(-1))
-        peptide_message_mask = torch.logical_and(peptide_message_mask, torch.logical_not(torch.eye(node_mask.shape[-1], device=node_mask.device)[None, ...]))
+        peptide_message_mask = torch.logical_and(peptide_node_mask.unsqueeze(-2), peptide_node_mask.unsqueeze(-1))
+        peptide_message_mask = torch.logical_and(peptide_message_mask, torch.logical_not(torch.eye(peptide_node_mask.shape[-1], device=peptide_node_mask.device)[None, ...]))
 
         # [*, N, P]
-        pocket_message_mask = torch.logical_and(node_mask.unsqueeze(-1), pocket_mask.unsqueeze(-2))
+        pocket_message_mask = torch.logical_and(peptide_node_mask.unsqueeze(-1), pocket_node_mask.unsqueeze(-2))
 
         # [*, N, N+P]
         message_mask = torch.cat((peptide_message_mask, pocket_message_mask), dim=-1)
 
-        # [*]
-        n_peptide_nodes = node_mask.sum(dim=-1)  # actual number of peptide nodes
-        n_pocket_nodes = pocket_mask.sum(dim=-1)  # actual number of pocket nodes
-        n_neighbours = n_peptide_nodes + n_pocket_nodes - 1  # actual number of neighbours that each peptide node has
-
-        # [*, N, 3]
-        x = frames.get_trans()
-
-        # [*, P, 3]
-        pocket_x = pocket_frames.get_trans()
-
-        # [*, N, 4]
-        q = frames.get_rots().get_quats()
-
-        # [*, P, 4]
-        pocket_q = pocket_frames.get_rots().get_quats()
-
-        # [*, N, N+P] : transforms each peptide node to neighbour-node-local space
-        global_to_local = Rigid.from_tensor_7(
-            torch.cat(
-                (
-                    frames.invert().to_tensor_7()[..., None, :, :].expand(list(frames.shape) + [frames.shape[-1], 7]),
-                    pocket_frames.invert().to_tensor_7()[..., None, :, :].expand(list(frames.shape) + [pocket_frames.shape[-1], 7]),
-                ), dim=-2
-            )
-        )
-
-        # representations of how distant two nodes' x and q are:
-        # [*, N, N]
-        peptide_d2 = torch.square(x[..., :, None, :] - x[..., None, :, :]).sum(dim=-1)
-        peptide_qdot = torch.abs((q[..., :, None, :] * q[..., None, :, :]).sum(dim=-1))
-
-        # [*, N, P]
-        pocket_d2 = torch.square(x[..., :, None, :] - pocket_x[..., None, :, :]).sum(dim=-1)
-        pocket_qdot = torch.abs((q[..., :, None, :] * pocket_q[..., None, :, :]).sum(dim=-1))
+        neighbour_frames_shape = list(message_mask.shape) + [7]
 
         # [*, N, N+P]
-        d2 = torch.cat((peptide_d2, pocket_d2), dim=-1)
-        qdot = torch.cat((peptide_qdot, pocket_qdot), dim=-1)
+        neighbour_frames = Rigid.from_tensor_7(
+            torch.cat(
+                (
+                    peptide_node_frames.to_tensor_7()[..., None, :, :],
+                    pocket_node_frames.to_tensor_7()[..., None, :, :],
+                ),
+                dim=-2,
+            ).expand(neighbour_frames_shape)
+        )
 
-        # neighbour-node-local representations of rotation and translation:
-        # [*, N, N+P, 3]
-        local_x = global_to_local.apply(x[..., :, None, :])
+        # [*, N, N+P, M]
+        message = self._compute_message(
+            peptide_node_features,
+            peptide_edge_features,
+            peptide_node_mask,
+            peptide_node_frames,
+            pocket_node_features,
+            pocket_node_mask,
+            neighbour_frames,
+        )
 
-        # [*, N, N+P, 4]
-        local_q = quat_multiply(global_to_local.get_rots().get_quats(), q[..., :, None, :])
+        # [*, N, N+P]
+        neighbour_weights = self._compute_attention(message, message_mask, peptide_node_frames, neighbour_frames)
+
+        # gen output feature
+        # [*, N, O]
+        o = self.feature_mlp(torch.cat((peptide_node_features, message.sum(dim=-2)), dim=-1))
+
+        N = peptide_node_frames.shape[-1]
+        P = pocket_node_frames.shape[-1]
+
+        # [*, N, 4]
+        upd_q = self._rotation_update(peptide_node_frames.get_rots().get_quats(), message, message_mask, neighbour_frames, neighbour_weights)
+
+        # [*, N, 7, 2]
+        upd_torsions = self._torsion_update(peptide_node_torsions, message, message_mask, neighbour_weights)
+
+        # [*, N]
+        peptide_upd_frames = Rigid(Rotation(quats=upd_q, normalize_quats=False), peptide_node_frames.get_trans())
+
+        # [*, N, N+P]
+        neighbour_frames = Rigid.from_tensor_7(
+            torch.cat(
+                (
+                    peptide_upd_frames.to_tensor_7()[..., None, :, :],
+                    pocket_node_frames.to_tensor_7()[..., None, :, :],
+                ),
+                dim=-2,
+            ).expand(neighbour_frames_shape)
+        )
+
+        # [*, N, 3]
+        upd_x = self._translation_update(peptide_node_frames.get_trans(), message, message_mask, neighbour_frames, neighbour_weights)
+
+        # Output updated frames, torsions and node features.
+        # We must normalize the quats here, for the next layer.
+        return Rigid(Rotation(quats=upd_q, normalize_quats=True), upd_x), upd_torsions, o
+
+    def _compute_message(
+        self,
+        peptide_node_features: torch.Tensor,
+        peptide_edge_features: torch.Tensor,
+        peptide_node_mask: torch.Tensor,
+        peptide_node_frames: Rigid,
+        pocket_node_features: torch.Tensor,
+        pocket_node_mask: torch.Tensor,
+        neighbour_frames: Rigid,
+    ) -> torch.Tensor:
+
+        N = peptide_node_features.shape[-2]
+        P = pocket_node_features.shape[-2]
+        E = peptide_edge_features.shape[-1]
 
         # features of neighbouring nodes i and j
         # [*, N, N+P, H]
-        h_i = h.unsqueeze(-2).expand(-1, -1, N + P, -1)
+        h_i = peptide_node_features[..., None, :].expand(-1, -1, N + P, -1)
         h_j = torch.cat(
-            (h.unsqueeze(-3).expand(-1, N, -1, -1), pocket_h.unsqueeze(-3).expand(-1, N, -1, -1)),
-            dim=-2
+            (
+                peptide_node_features[..., None, :, :].expand(-1, N, -1, -1),
+                pocket_node_features[..., None, :, :].expand(-1, N, -1, -1),
+            ),
+            dim=-2,
         )
+
+        # zero edge features from pocket to peptide
+        # [*, N, P, E]
+        pocket_edge_features = torch.zeros(list(peptide_edge_features.shape[:-2]) + [P, E], device=peptide_edge_features.device)
+
+        # [*, N, N+P, E]
+        e = torch.cat(
+            (
+                peptide_edge_features,
+                pocket_edge_features,
+            ),
+            dim=-2,
+        )
+
+        # gen message
+        # [*, N, N+P, M]
+        message = self.message_mlp(torch.cat((h_i, h_j, e), dim=-1))
+
+        return message
+
+    def _compute_attention(
+        self,
+        message: torch.Tensor,
+        message_mask: torch.Tensor,
+        node_frames: Rigid,
+        neighbour_frames: Rigid,
+    ) -> torch.Tensor:
+
+        # representations of how distant two nodes' x and q are:
+        # [*, N, N+P]
+        d2 = torch.square(node_frames.get_trans()[..., :, None, :] - neighbour_frames.get_trans()).sum(dim=-1)
+        qdot2 = torch.square((node_frames.get_rots().get_quats()[..., :, None, :] * neighbour_frames.get_rots().get_quats()).sum(dim=-1))
+
+        # [*, N, N+P] (adds on to 1.0 in dimension -1, 0.0 where masked)
+        neighbour_weights = self.attention_mlp(torch.cat((message, -d2[..., None], qdot2[..., None]), dim=-1))
+        neighbour_weights = torch.nn.functional.softmax(neighbour_weights - torch.logical_not(message_mask) * infinity, dim=-1)
+
+        return neighbour_weights
+
+    def _torsion_update(
+        self,
+        torsions: torch.Tensor,
+        message: torch.Tensor,
+        message_mask: torch.Tensor,
+        neighbour_weights: torch.Tensor,
+    ) -> torch.Tensor:
 
         # torsions representation
         # [*, N, 7 * 2]
         flat_torsions = torsions.reshape(list(torsions.shape[:-2]) + [torsions.shape[-2] * torsions.shape[-1]])
 
-        # [*, N, N+P, 7 * 2]
-        flat_torsions_i = flat_torsions[..., None, :].expand(list(flat_torsions.shape[:-1]) + [N + P, flat_torsions.shape[-1]])
+        # [*, N, N+P, 7]
+        m_delta_a = self.torsion_mlp(torch.cat((message, flat_torsions[..., None, :].expand(list(message.shape[:-1]) + [flat_torsions.shape[-1]])), dim=-1))
 
-        # edge feature representation
-        # [*, N, N+P, E]
-        e = torch.cat((e, pocket_e), dim=-2)
+        # [*, N, 7]
+        delta_a = (m_delta_a * neighbour_weights[..., None]).sum(dim=-2)
 
-        # gen message
-        # [*, N, N+P, M]
-        m = self.message_mlp(torch.cat((h_i, h_j, e, local_x, local_q, d2[..., None], qdot[..., None], flat_torsions_i), dim=-1)) * message_mask[..., None]
-
-        # gen output feature
-        # [*, N, O]
-        o = self.feature_mlp(torch.cat((h, m.sum(dim=-2)), dim=-1))
-
-        # gen torsion updates
         # [*, N, 7, 2]
-        upd_torsions = torch.nn.functional.normalize(
-            self.torsion_mlp(torch.cat((m.sum(dim=-2), flat_torsions), dim=-1)).reshape(torsions.shape),
-            dim=-1,
+        delta_t = torch.cat((torch.sin(delta_a)[..., None], torch.cos(delta_a)[..., None]), dim=-1)
+
+        # [*, N, 7, 2]
+        torsions = multiply_sin_cos(delta_t, torsions)
+        return torsions
+
+    def _rotation_update(
+        self,
+        quats: torch.Tensor,
+        message: torch.Tensor,
+        message_mask: torch.Tensor,
+        neighbour_frames: Rigid,
+        neighbour_weights: torch.Tensor,
+    ) -> torch.Tensor:
+
+        # [*, N, N+P, 4]
+        neighbour_quats = neighbour_frames.get_rots().get_quats()
+        inverse_neighbour_quats = invert_quat(neighbour_quats)
+
+        # convert node quats to neighbour-local space
+        # [*, N, N+P, 4]
+        local_quats = quat_multiply(inverse_neighbour_quats, quat_multiply(quats[..., :, None, :], neighbour_quats))
+
+        # learn update rotation in neighbour-local space
+        # [*, N, N+P, 4]
+        local_delta_quats = self.rotation_mlp(torch.cat((message, local_quats), dim=-1))
+        torch.nn.functional.normalize(local_delta_quats, dim=-1)
+
+        # convert predicted quats to global space and take the mean (approximization)
+        # [*, N, N+P, 4]
+        m_global_delta_quats = quat_multiply(neighbour_quats, quat_multiply(local_delta_quats, inverse_neighbour_quats))
+
+        # [*, N, 4]
+        # must convert masked quats to identity before normalizing
+        global_delta_quats = (m_global_delta_quats * neighbour_weights[..., None]).sum(dim=-2)
+        global_delta_quats = torch.where(
+            (message_mask.sum(dim=-1) > 0)[..., None].expand(global_delta_quats.shape),
+            global_delta_quats,
+            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=global_delta_quats.device),
         )
+        global_delta_quats = torch.nn.functional.normalize(global_delta_quats, dim=-1)
+
+        # global rotation update
+        # [*, N, 4]
+        quats = quat_multiply(global_delta_quats, quats)
+
+        return quats
+
+    def _translation_update(
+        self,
+        x: torch.Tensor,
+        message: torch.Tensor,
+        message_mask: torch.Tensor,
+        neighbour_frames: Rigid,
+        neighbour_weights: torch.Tensor,
+    ) -> torch.Tensor:
 
         # gen local translation update
+        # [*, N, N+P, 1]
+        m = self.translation_mlp(message)
+
         # [*, N, N+P, 3]
-        dx = self.translation_mlp(m) * message_mask[..., None]
-
-        # gen local rotation update, identity where masked
-        # [*, N, 4]
-        dq = self.quat_mlp(m.sum(dim=-2))
-        dq = torch.where(
-            node_mask.unsqueeze(-1).expand(dq.shape),
-            dq,
-            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=dq.device).expand(dq.shape),
-        )
-        dq = torch.nn.functional.normalize(dq, dim=-1)
-
-        # global rotation update, identity where masked
-        # [*, N, 4]
-        upd_q = quat_multiply(q, dq)
-        upd_q = torch.where(
-            node_mask.unsqueeze(-1).expand(upd_q.shape),
-            upd_q,
-            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=upd_q.device).expand(q.shape)
-        )
-
-        # transform local translation updates to global space
-        # [*, N, N+P]
-        rot_local_to_global = Rotation(
-            quats=torch.cat(
-                (
-                    q[..., None, :, :].expand(list(q.shape[:-1]) + [N, 4]),
-                    pocket_q[..., None, :, :].expand(list(q.shape[:-1]) + [P, 4])
-                ),
-                dim=-2
-            ),
-            normalize_quats=True
-        )
+        r = x[..., :, None, :] - neighbour_frames.get_trans()
 
         # [*, N, 3]
-        upd_x = x + rot_local_to_global.apply(dx).sum(dim=-2) / n_neighbours[:, None, None]
+        x = x + (m * r * neighbour_weights[..., None]).sum(dim=-2)
 
-        # output updated frames, torsions and node features
-        return Rigid(Rotation(quats=upd_q, normalize_quats=True), upd_x), upd_torsions, o
+        return x
 
 
 class Model(torch.nn.Module):
@@ -267,7 +365,7 @@ class Model(torch.nn.Module):
         E = relposenc_depth
 
         I = 64
-        M = 32
+        M = 64
 
         self.gnn1 = EGNNLayer(H, E, I, M)
         self.gnn2 = EGNNLayer(I, E, 1, M)
@@ -302,11 +400,8 @@ class Model(torch.nn.Module):
         # do not include time with pocket nodes
         pocket_h = torch.cat((pocket_features, torch.zeros(list(pocket_mask.shape) + [1], device=pocket_features.device)), dim=-1)
 
-        # leave pocket edge features blank
-        pocket_e = torch.zeros(batch_size, e.shape[-3], pocket_mask.shape[-1], e.shape[-1], device=e.device)
-
         # gnn update layer 1
-        frames, torsions, i = self.gnn1(noised_frames, noised_torsions, h, e, node_mask, pocket_h, pocket_e, pocket_frames, pocket_mask)
+        frames, torsions, i = self.gnn1(noised_frames, noised_torsions, h, e, node_mask, pocket_h, pocket_frames, pocket_mask)
 
         # activation function on updated node features
         i = self.act(i)
@@ -317,7 +412,7 @@ class Model(torch.nn.Module):
         pocket_i[..., :pocket_h.shape[-1]] = pocket_h
 
         # gnn update layer 2
-        frames, torsions, o = self.gnn2(frames, torsions, i, e, node_mask, pocket_i, pocket_e, pocket_frames, pocket_mask)
+        frames, torsions, o = self.gnn2(frames, torsions, i, e, node_mask, pocket_i, pocket_frames, pocket_mask)
 
         # output updated data as noise prediction
         return {
