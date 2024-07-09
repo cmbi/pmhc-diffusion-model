@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 import logging
 
 import torch
+from torch.utils.data import DataLoader
 from openfold.utils.rigid_utils import Rigid
 
 from diffusion.optimizer import DiffusionModelOptimizer
@@ -19,9 +20,10 @@ _log = logging.getLogger(__name__)
 arg_parser = ArgumentParser()
 arg_parser.add_argument("model", help="model parameters file")
 arg_parser.add_argument("test_hdf5", help="test data")
-arg_parser.add_argument("id", help="id of sampling entry within test hdf5")
 arg_parser.add_argument("--debug", "-d", action="store_const", const=True, default=False, help="run in debug mode")
 arg_parser.add_argument("-T", type=int, default=1000, help="number of noise steps")
+arg_parser.add_argument("--batch-size", "-b", type=int, help="data batch size", default=64)
+arg_parser.add_argument("--num-workers", "-w", type=int, help="number of batch loading workers", default=4)
 
 if __name__ == "__main__":
 
@@ -51,33 +53,32 @@ if __name__ == "__main__":
     # load model state from input file
     model.load_state_dict(torch.load(args.model, map_location=device))
 
-    # get requested data from file
+    # open dataset
     test_dataset = MhcpDataset(args.test_hdf5, device)
-    test_entry = test_dataset.get_entry(args.id)
-    test_entry.update(test_dataset.get_protein_positions(args.id))
 
-    # for sampling, make a batch of size 1
-    true_batch = {k: test_entry[k].unsqueeze(0) for k in test_entry if isinstance(test_entry[k], torch.Tensor)}
-    true_batch["frames"] = Rigid.from_tensor_7(true_batch["frames"])
-    true_batch["pocket_frames"] = Rigid.from_tensor_7(true_batch["pocket_frames"])
-
-    # noisify
-    noise = dm.gen_noise(true_batch["frames"].shape, device=device)
-    input_batch = {k: true_batch[k] for k in true_batch}
-    input_batch["frames"] = noise["frames"]
-    input_batch["torsions"] = noise["torsions"]
-
-    # save truth and noisified data
-    save(true_batch, 0, f"{args.id}-true.pdb")
-    save(input_batch, 0, f"{args.id}-input.pdb")
+    # get output directory
+    output_path = os.path.splitext(args.test_hdf5)[0] + "-sampled"
+    if not os.path.isdir(output_path):
+        os.mkdir(output_path)
 
     with torch.no_grad():
+        for true_batch in DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers):
 
-        # convert back to tensors, for the optimizer to handle the format
-        input_batch["frames"] = input_batch["frames"].to_tensor_7()
-        input_batch["pocket_frames"] = input_batch["pocket_frames"].to_tensor_7()
+            # get entry names
+            names = list(true_batch['name'][0])
 
-        pred_batch = dm.sample(input_batch)
+            # noisify
+            noise = dm.gen_noise(true_batch["frames"].shape[:-1], device=device)
+            input_batch = {k: true_batch[k] for k in true_batch}
+            input_batch["frames"] = noise["frames"].to_tensor_7()
+            input_batch["torsions"] = noise["torsions"]
 
-    # save denoisified data
-    save(pred_batch, 0, f"{args.id}-output.pdb")
+            # denoisify
+            pred_batch = dm.sample(input_batch)
+
+            # add all protein residues
+            pred_batch.update(test_dataset.get_protein_positions(names))
+
+            # save denoisified data
+            for i, name in enumerate(names):
+                save(pred_batch, i, f"{output_path}/{name}.pdb")

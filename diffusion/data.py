@@ -118,16 +118,28 @@ class MhcpDataset(Dataset):
 
         return data
 
-    def get_protein_positions(self, entry_name: str) -> Dict[str, numpy.ndarray]:
+    def get_protein_positions(self, entry_names: List[str]) -> Dict[str, numpy.ndarray]:
 
-        data = {}
+        # init dict
+        data = {
+            "protein_aatype": [],
+            "protein_atom14_positions": [],
+            "protein_atom14_exists": [],
+        }
+
+        # load data
         with h5py.File(self.hdf5_path, 'r') as f5:
-            entry = f5[entry_name]
+            for entry_name in entry_names:
+                entry = f5[entry_name]
 
-            mhc = entry['protein']
+                mhc = entry['protein']
 
-            data["protein_aatype"] = torch.tensor(mhc['aatype'][:], device=self.device)
-            data["protein_atom14_positions"] = torch.tensor(mhc['atom14_gt_positions'][:], device=self.device)
-            data["protein_atom14_exists"] = torch.tensor(mhc['atom14_gt_exists'][:], device=self.device)
+                data["protein_aatype"].append(torch.tensor(mhc['aatype'][:], device=self.device))
+                data["protein_atom14_positions"].append(torch.tensor(mhc['atom14_gt_positions'][:], device=self.device))
+                data["protein_atom14_exists"].append(torch.tensor(mhc['atom14_gt_exists'][:], device=self.device))
+
+        # stack all data
+        for k in data:
+            data[k] = torch.stack(data[k])
 
         return data
