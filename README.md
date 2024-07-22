@@ -44,5 +44,5 @@ $ python optimize.py train_set.hdf5 100 model.pth
 ## testing
 
 ```
-$ python test.pymodel.pth test_set.hdf5
+$ python test.py model.pth test_set.hdf5
 ```
